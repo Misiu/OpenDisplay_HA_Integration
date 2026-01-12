@@ -96,4 +96,4 @@ Devices should be automatically discovered after installation.
 ## Contributing
 - Feature requests and bug reports are welcome! Please open an issue on GitHub
 - Pull requests are encouraged
-- Join the [Discord server](https://discord.com/invite/XmTHz8RfJE) to discuss ideas and get help
+- Join the [Discord server](https://discord.com/invite/tw48NCrRxH) to discuss ideas and get help
