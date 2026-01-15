@@ -7,7 +7,7 @@
 
 
 
-Home Assistant Integration for the [OpenDisplay](https://github.com/jjwbruijn/OpenDisplay) project, enabling control and monitoring of E-Paper displays through Home Assistant.
+Home Assistant Integration for the [OpenDisplay](https://opendisplay.org/) project, enabling control and monitoring of E-Paper displays through Home Assistant.
 
 ## Requirements
 
