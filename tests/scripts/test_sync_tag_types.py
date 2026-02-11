@@ -183,15 +183,19 @@ class TestGenerateFallbackContent:
             17: {"version": 1, "name": "C", "width": 1, "height": 1},
         }
         content = generate_tag_types.generate_fallback_content(data)
-        ids = [int(re.match(r"\s+(\d+):", line).group(1)) for line in content.split("\n")]
+        ids = [
+            int(m.group(1))
+            for line in content.split("\n")
+            if (m := re.match(r"\s+(\d+):", line))
+        ]
         assert ids == [2, 17, 100]
 
-    def test_unicode_chars(self):
-        """Unicode characters in names should be handled without errors."""
+    def test_unicode_chars_preserved(self):
+        """Unicode characters should be preserved (not escaped) with ensure_ascii=False."""
         data = {240: {"version": 2, "name": "SLT\u2010EM007", "width": 0, "height": 0}}
         content = generate_tag_types.generate_fallback_content(data)
-        # Should contain the json-escaped unicode
-        assert "\\u2010" in content or "\u2010" in content
+        # ensure_ascii=False preserves the actual Unicode character
+        assert "\u2010" in content
 
 
 # ---------------------------------------------------------------------------
