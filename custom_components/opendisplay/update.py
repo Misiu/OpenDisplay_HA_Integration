@@ -23,8 +23,8 @@ from .util import is_ble_entry
 
 _LOGGER = logging.getLogger(__name__)
 
-GITHUB_LATEST_URL = "https://api.github.com/repos/OpenDisplay/OpenDisplay_BLE/releases/latest"
-DEFAULT_RELEASE_URL = "https://github.com/OpenDisplay/OpenDisplay_BLE/releases"
+GITHUB_LATEST_URL = "https://api.github.com/repos/OpenDisplay-org/Firmware/releases/latest"
+DEFAULT_RELEASE_URL = "https://github.com/OpenDisplay-org/Firmware/releases"
 CACHE_DURATION = timedelta(hours=6)
 
 
@@ -163,19 +163,48 @@ class OpenDisplayBleUpdateEntity(OpenDisplayBLEEntity, UpdateEntity):
         return self._release_notes
 
     async def async_added_to_hass(self) -> None:
-        # Ensure we have fresh installed_version and fetch latest once on add
+        """Ensure we have fresh installed_version and fetch latest once on add."""
+        _LOGGER.debug(
+            "Adding OpenDisplay update entity to hass for %s", self._mac
+        )
         self._attr_installed_version = self._compute_installed_version()
+        _LOGGER.debug(
+            "Installed version for %s: %s", self._mac, self._attr_installed_version
+        )
         await self.async_update()
+        _LOGGER.debug(
+            "After initial update for %s: installed=%s latest=%s release_url=%s",
+            self._mac,
+            self._attr_installed_version,
+            self._latest_version,
+            self._release_url,
+        )
         self.async_write_ha_state()
 
     async def async_update(self) -> None:
         """Refresh installed_version (in case metadata changed) and latest version from GitHub (cached)."""
         self._attr_installed_version = self._compute_installed_version()
+        _LOGGER.debug(
+            "async_update called for %s; installed_version=%s",
+            self._mac,
+            self._attr_installed_version,
+        )
 
         now = datetime.utcnow()
         if self._last_checked and now - self._last_checked < CACHE_DURATION:
+            _LOGGER.debug(
+                "Skipping GitHub fetch for %s; last checked %s (cache valid for %s)",
+                self._mac,
+                self._last_checked,
+                CACHE_DURATION,
+            )
             return
 
+        _LOGGER.debug(
+            "Fetching latest firmware version from GitHub for %s: %s",
+            self._mac,
+            GITHUB_LATEST_URL,
+        )
         try:
             async with self._session.get(
                     GITHUB_LATEST_URL,
@@ -185,11 +214,18 @@ class OpenDisplayBleUpdateEntity(OpenDisplayBLEEntity, UpdateEntity):
                     },
                     raise_for_status=True,
             ) as resp:
+                _LOGGER.debug(
+                    "GitHub API response status for %s: %s", self._mac, resp.status
+                )
                 data = await resp.json()
 
             tag = data.get("tag_name") or data.get("name")
             if not tag:
-                _LOGGER.debug("No tag_name/name in GitHub response for %s", self._mac)
+                _LOGGER.warning(
+                    "No tag_name/name in GitHub response for %s; keys=%s",
+                    self._mac,
+                    list(data.keys()),
+                )
                 return
 
             normalized = tag[1:] if tag.startswith("v") else tag
@@ -198,13 +234,29 @@ class OpenDisplayBleUpdateEntity(OpenDisplayBLEEntity, UpdateEntity):
             self._release_notes = data.get("body")
             self._last_checked = now
             self._last_fetch_error = None
+            _LOGGER.debug(
+                "GitHub fetch successful for %s: tag=%s normalized=%s release_url=%s",
+                self._mac,
+                tag,
+                normalized,
+                self._release_url,
+            )
         except Exception as err:
             msg = str(err)
             if msg != self._last_fetch_error:
-                _LOGGER.error("Failed to fetch OpenDisplay firmware latest version: %s", msg)
+                _LOGGER.error(
+                    "Failed to fetch OpenDisplay firmware latest version for %s from %s: %s",
+                    self._mac,
+                    GITHUB_LATEST_URL,
+                    msg,
+                )
                 self._last_fetch_error = msg
             else:
-                _LOGGER.debug("Failed to fetch OpenDisplay firmware latest version: %s", msg)
+                _LOGGER.debug(
+                    "Failed to fetch OpenDisplay firmware latest version for %s: %s",
+                    self._mac,
+                    msg,
+                )
 
     def version_is_newer(self, latest_version: str, installed_version: str) -> bool:
         """Use AwesomeVersion for comparison."""
