@@ -18,7 +18,7 @@ UPDATE_PY_PATH = os.path.join(
 
 def _read_constant(name: str) -> str:
     """Parse update.py's AST to extract a module-level string constant."""
-    with open(UPDATE_PY_PATH) as fh:
+    with open(UPDATE_PY_PATH, encoding="utf-8") as fh:
         tree = ast.parse(fh.read())
     for node in ast.iter_child_nodes(tree):
         if isinstance(node, ast.Assign):

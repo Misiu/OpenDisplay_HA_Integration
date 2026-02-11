@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import logging
 
 from awesomeversion import AwesomeVersion
@@ -190,7 +190,7 @@ class OpenDisplayBleUpdateEntity(OpenDisplayBLEEntity, UpdateEntity):
             self._attr_installed_version,
         )
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         if self._last_checked and now - self._last_checked < CACHE_DURATION:
             _LOGGER.debug(
                 "Skipping GitHub fetch for %s; last checked %s (cache valid for %s)",
