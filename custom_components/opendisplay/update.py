@@ -47,6 +47,13 @@ _IC_TYPE_ASSET_PREFIXES: dict[int, str] = {
     IC_TYPE_ESP32_C6: "esp32-c6-",
 }
 
+_IC_TYPE_NAMES: dict[int, str] = {
+    IC_TYPE_NRF52840: "NRF52840",
+    IC_TYPE_ESP32_S3: "ESP32-S3",
+    IC_TYPE_ESP32_C3: "ESP32-C3",
+    IC_TYPE_ESP32_C6: "ESP32-C6",
+}
+
 
 async def async_setup_entry(
         hass: HomeAssistant, entry, async_add_entities: AddEntitiesCallback
@@ -233,12 +240,12 @@ class OpenDisplayBleUpdateEntity(OpenDisplayBLEEntity, UpdateEntity):
 
     def _get_ic_type(self) -> int | None:
         """Return IC type from device metadata, or None if unavailable."""
-        metadata_dict = self._entry_data.device_metadata or {}
-        config = metadata_dict.get("open_display_config", {})
-        system = config.get("system")
-        if system:
-            return system.get("ic_type")
-        return None
+        return (
+            (self._entry_data.device_metadata or {})
+            .get("open_display_config", {})
+            .get("system", {})
+            .get("ic_type")
+        )
 
     def version_is_newer(self, latest_version: str, installed_version: str) -> bool:
         """Use AwesomeVersion for comparison."""
@@ -380,11 +387,7 @@ class OpenDisplayBleUpdateEntity(OpenDisplayBLEEntity, UpdateEntity):
         """Install firmware on ESP32 via BLE OTA protocol."""
         fw_url = await self._get_firmware_download_url(target_version, ic_type)
         if not fw_url:
-            chip_name = {
-                IC_TYPE_ESP32_S3: "ESP32-S3",
-                IC_TYPE_ESP32_C3: "ESP32-C3",
-                IC_TYPE_ESP32_C6: "ESP32-C6",
-            }.get(ic_type, f"ic_type={ic_type}")
+            chip_name = _IC_TYPE_NAMES.get(ic_type, f"ic_type={ic_type}")
             raise HomeAssistantError(
                 f"Could not find firmware .bin for {chip_name}"
                 f" in release {target_version}"

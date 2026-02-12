@@ -10,8 +10,11 @@ Protocol flow:
     HA → [0x00, 0x48]                                 → ACK {0x00, 0x48}  → reboot
 """
 
+from __future__ import annotations
+
 import logging
 import struct
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from .protocol_open_display import (
@@ -61,9 +64,9 @@ def _check_ota_response(response: bytes, expected_cmd: int) -> None:
 
 
 async def perform_esp32_ota(
-    connection: "BLEConnection",
+    connection: BLEConnection,
     firmware_data: bytes,
-    progress_callback=None,
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> bool:
     """Flash firmware to an ESP32 device over BLE using the OTA protocol.
 
