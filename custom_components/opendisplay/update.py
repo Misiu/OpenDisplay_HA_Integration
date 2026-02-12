@@ -39,7 +39,9 @@ IC_TYPE_ESP32_C3 = 3
 IC_TYPE_ESP32_C6 = 4
 
 # Mapping from IC type to firmware asset search prefix for GitHub releases.
-# NRF52840 uses the DFU .zip package; ESP32 variants use application .bin.
+# NRF52840 uses the DFU .zip package (contains init packet + binary required
+# by the Nordic DFU bootloader; .hex/.uf2 lack the init packet).
+# ESP32 variants use the application-only .bin (excludes _full.bin merged images).
 _IC_TYPE_ASSET_PREFIXES: dict[int, str] = {
     IC_TYPE_NRF52840: "NRF52840",
     IC_TYPE_ESP32_S3: "esp32-s3-",
@@ -317,7 +319,14 @@ class OpenDisplayBleUpdateEntity(OpenDisplayBLEEntity, UpdateEntity):
     # ------------------------------------------------------------------
 
     async def _install_nrf52840(self, target_version: str) -> None:
-        """Install firmware on NRF52840 via Nordic DFU bootloader."""
+        """Install firmware on NRF52840 via Nordic DFU bootloader.
+
+        Downloads ``NRF52840.zip`` (the Adafruit nrfutil DFU package) which
+        contains the init packet (``.dat``) and firmware binary (``.bin``).
+        The ``.hex`` and ``.uf2`` release assets do NOT contain the init
+        packet required by the Nordic DFU protocol, so the ``.zip`` is the
+        only viable format for BLE OTA on this platform.
+        """
         # Download DFU package
         dfu_url = await self._get_firmware_download_url(
             target_version, IC_TYPE_NRF52840
@@ -384,7 +393,12 @@ class OpenDisplayBleUpdateEntity(OpenDisplayBLEEntity, UpdateEntity):
     # ------------------------------------------------------------------
 
     async def _install_esp32(self, target_version: str, ic_type: int) -> None:
-        """Install firmware on ESP32 via BLE OTA protocol."""
+        """Install firmware on ESP32 via BLE OTA protocol.
+
+        Downloads the application-only ``.bin`` (e.g. ``esp32-s3-N16R8.bin``),
+        NOT the merged ``_full.bin`` which includes the bootloader/partition
+        table and is only for initial USB flashing.
+        """
         fw_url = await self._get_firmware_download_url(target_version, ic_type)
         if not fw_url:
             chip_name = _IC_TYPE_NAMES.get(ic_type, f"ic_type={ic_type}")
@@ -436,9 +450,17 @@ class OpenDisplayBleUpdateEntity(OpenDisplayBLEEntity, UpdateEntity):
     ) -> str | None:
         """Find the download URL for the correct firmware asset.
 
-        For NRF52840 this looks for ``NRF52840.zip``.
-        For ESP32 variants this looks for ``esp32-{variant}-*.bin``
-        (excluding ``*_full.bin`` merged images).
+        Release assets and which one each platform needs:
+
+        **NRF52840** — uses Nordic DFU bootloader (cmd 0x0044) which requires
+        a DFU package containing both an init packet (``.dat``) and firmware
+        binary (``.bin``).  Only ``NRF52840.zip`` has both; the ``.hex`` and
+        ``.uf2`` assets lack the init packet and cannot be used for BLE DFU.
+
+        **ESP32** — uses BLE OTA (cmds 0x0046/47/48) streaming a raw
+        application ``.bin`` via ``Update.write()``.  The ``_full.bin`` merged
+        images (bootloader + partitions + app) must be excluded as they are
+        intended for initial USB flash only.
 
         Args:
             version: Release version tag (e.g. "1.2" or "v1.2")

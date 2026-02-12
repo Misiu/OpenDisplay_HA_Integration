@@ -4,6 +4,10 @@ Uses the OpenDisplay BLE OTA protocol (commands 0x0046/0x0047/0x0048) to flash
 firmware directly over an existing BLE connection. This is used for ESP32-S3,
 ESP32-C3, and ESP32-C6 devices.
 
+The firmware binary must be the **application-only** ``.bin`` (e.g.
+``esp32-s3-N16R8.bin``), **not** the merged ``_full.bin`` which includes the
+bootloader and partition table and would be rejected by ``Update.write()``.
+
 Protocol flow:
     HA → [0x00, 0x46, size₀, size₁, size₂, size₃]  → ACK {0x00, 0x46}
     HA → [0x00, 0x47, chunk...]                       → ACK {0x00, 0x47}  (repeat)
