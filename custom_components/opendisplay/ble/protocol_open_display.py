@@ -20,6 +20,12 @@ _LOGGER = logging.getLogger(__name__)
 # OpenDisplay protocol constants
 CMD_READ_CONFIG = bytes([0x00, 0x40])
 CMD_READ_FW_VERSION = bytes([0x00, 0x43])
+CMD_ENTER_DFU_OTA = bytes([0x00, 0x44])
+CMD_ENTER_DFU_SERIAL = bytes([0x00, 0x45])
+
+# DFU response codes
+RESP_SUCCESS = 0x00
+RESP_ERROR = 0xFF
 
 
 def _format_config_summary(config: GlobalConfig, mac_address: str) -> str:
@@ -416,6 +422,52 @@ class OpenDisplayProtocol(BLEProtocol):
                          or None if no config has been read yet
         """
         return self._last_config
+
+    async def enter_dfu_mode(self, connection: "BLEConnection") -> bool:
+        """Send command to enter OTA DFU bootloader mode.
+
+        The device will:
+        1. Respond with [0x00, 0x44] (success) or [0xFF, 0x44] (error)
+        2. Reset into the Adafruit BLE DFU bootloader
+        3. The BLE connection will be lost
+
+        Args:
+            connection: Active BLE connection to device
+
+        Returns:
+            bool: True if device acknowledged the command
+
+        Raises:
+            BLEProtocolError: If device returns error response
+        """
+        response = await connection.write_command_with_response(
+            CMD_ENTER_DFU_OTA, timeout=5.0
+        )
+
+        if len(response) >= 2:
+            status = response[0]
+            cmd_echo = response[1]
+
+            if status == RESP_SUCCESS and cmd_echo == 0x44:
+                _LOGGER.info(
+                    "Device %s acknowledged DFU mode entry",
+                    connection.mac_address,
+                )
+                return True
+            if status == RESP_ERROR:
+                _LOGGER.error(
+                    "Device %s rejected DFU mode entry"
+                    " (not supported on this platform)",
+                    connection.mac_address,
+                )
+                return False
+
+        _LOGGER.warning(
+            "Unexpected DFU response from %s: %s",
+            connection.mac_address,
+            response.hex(),
+        )
+        return False
 
     async def read_firmware_version(self, connection: "BLEConnection") -> dict:
         """Read firmware version using command 0x0043.

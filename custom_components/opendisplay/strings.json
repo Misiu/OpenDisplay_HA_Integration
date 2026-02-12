@@ -279,7 +279,7 @@
   "preview_features": {
     "opendisplay_ble_updates": {
       "name": "OpenDisplay firmware updates",
-      "description": "Shows a firmware update entity for OpenDisplay BLE tags that compares the installed firmware to the latest OpenDisplay_BLE GitHub release. Install is not available yet."
+      "description": "Shows a firmware update entity for OpenDisplay BLE tags that compares the installed firmware to the latest OpenDisplay_BLE GitHub release. Supports OTA DFU firmware installation for NRF52840 devices."
     }
   },
   "exceptions": {
@@ -373,6 +373,14 @@
     "config_flow_invalid_config": { "message": "Device returned invalid configuration data." },
     "config_flow_missing_config": { "message": "Device returned no configuration data." },
     "refresh_config_failed": { "message": "Failed to refresh configuration: {error}." },
-    "multiple_errors": { "message": "Multiple errors occurred:\n{errors}" }
+    "multiple_errors": { "message": "Multiple errors occurred:\n{errors}" },
+    "dfu_already_in_progress": { "message": "A firmware update is already in progress for {mac_address}." },
+    "dfu_no_target_version": { "message": "No target firmware version available for update." },
+    "dfu_download_failed": { "message": "Failed to download DFU package for version {version}: HTTP {status_code}." },
+    "dfu_invalid_package": { "message": "Downloaded DFU package is invalid: {error}." },
+    "dfu_mode_rejected": { "message": "Device {mac_address} rejected DFU mode command. The device may not be an NRF52840 or may not support OTA updates." },
+    "dfu_bootloader_not_found": { "message": "DFU bootloader not found for {mac_address} after {timeout}s. The device may have failed to enter DFU mode." },
+    "dfu_flash_failed": { "message": "DFU firmware flash failed for {mac_address}: {error}." },
+    "dfu_update_failed": { "message": "Firmware update failed for {mac_address}: {error}." }
   }
 }

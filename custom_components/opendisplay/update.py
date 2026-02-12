@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta
 import logging
 
@@ -11,11 +12,14 @@ from homeassistant.components.update import (
     UpdateEntityFeature,
 )
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .ble import BLEDeviceMetadata
+from .ble import BLEConnection, BLEDeviceMetadata, get_protocol_by_name
+from .ble.nrf_dfu import parse_dfu_package, perform_dfu_update
+from .ble.protocol_open_display import OpenDisplayProtocol
 from .const import DOMAIN
 from .entity import OpenDisplayBLEEntity
 from .runtime_data import OpenDisplayBLERuntimeData
@@ -87,7 +91,11 @@ class OpenDisplayBleUpdateEntity(OpenDisplayBLEEntity, UpdateEntity):
     _attr_translation_key = "opendisplay_ble_firmware"
     _attr_device_class = UpdateDeviceClass.FIRMWARE
     _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_supported_features = UpdateEntityFeature.RELEASE_NOTES
+    _attr_supported_features = (
+        UpdateEntityFeature.INSTALL
+        | UpdateEntityFeature.RELEASE_NOTES
+        | UpdateEntityFeature.PROGRESS
+    )
     _attr_should_poll = True
     _attr_entity_registry_enabled_default = True
 
@@ -108,6 +116,7 @@ class OpenDisplayBleUpdateEntity(OpenDisplayBLEEntity, UpdateEntity):
         self._mac = runtime_data.mac_address
         self._name = runtime_data.name
         self._session = async_get_clientsession(hass)
+        self._is_updating = False
         super().__init__(self._mac, self._name, entry)
         self._attr_unique_id = f"opendisplay_ble_{self._mac}_firmware_update"
         self._attr_installed_version = self._compute_installed_version()
@@ -212,3 +221,152 @@ class OpenDisplayBleUpdateEntity(OpenDisplayBLEEntity, UpdateEntity):
             return AwesomeVersion(latest_version) > AwesomeVersion(installed_version)
         except Exception:
             return latest_version != installed_version
+
+    async def async_install(
+        self, version: str | None, backup: bool, **kwargs
+    ) -> None:
+        """Install firmware update via BLE DFU.
+
+        Steps:
+        1. Download DFU package (.zip) from GitHub release
+        2. Connect to device and send DFU mode command (0x0044)
+        3. Wait for device to reset into DFU bootloader
+        4. Connect to DFU bootloader and flash firmware
+        5. Verify update by reading firmware version
+        """
+        if self._is_updating:
+            _LOGGER.warning("Update already in progress for %s", self._mac)
+            return
+
+        self._is_updating = True
+
+        try:
+            # Step 1: Download DFU package from GitHub
+            target_version = version or self._latest_version
+            if not target_version:
+                raise HomeAssistantError("No target version available")
+
+            dfu_url = await self._get_dfu_download_url(target_version)
+            if not dfu_url:
+                raise HomeAssistantError(
+                    f"Could not find NRF52840.zip in release {target_version}"
+                )
+
+            _LOGGER.info("Downloading DFU package from %s", dfu_url)
+            async with self._session.get(dfu_url) as resp:
+                if resp.status != 200:
+                    raise HomeAssistantError(
+                        f"Failed to download DFU package: HTTP {resp.status}"
+                    )
+                dfu_data = await resp.read()
+
+            _LOGGER.info("Downloaded DFU package: %d bytes", len(dfu_data))
+
+            # Validate it's a valid DFU package
+            try:
+                parse_dfu_package(dfu_data)
+            except ValueError as err:
+                raise HomeAssistantError(
+                    f"Invalid DFU package: {err}"
+                ) from err
+
+            # Step 2: Connect and send DFU mode command
+            protocol = get_protocol_by_name("open_display")
+            assert isinstance(protocol, OpenDisplayProtocol)
+
+            _LOGGER.info("Sending DFU mode command to %s", self._mac)
+            self._attr_in_progress = True
+            self.async_write_ha_state()
+
+            async with BLEConnection(
+                self.hass, self._mac, protocol.service_uuid, protocol
+            ) as conn:
+                success = await protocol.enter_dfu_mode(conn)
+                if not success:
+                    raise HomeAssistantError(
+                        "Device rejected DFU mode command"
+                        " (may not be NRF52840)"
+                    )
+
+            # Step 3: Wait for device to reset into bootloader
+            _LOGGER.info("Waiting for device to enter DFU bootloader...")
+            await asyncio.sleep(3)
+
+            # Step 4: Perform DFU flash
+            def _progress_callback(bytes_sent, total_bytes):
+                progress = int((bytes_sent / total_bytes) * 100)
+                self._attr_in_progress = progress
+                self.async_write_ha_state()
+
+            success = await perform_dfu_update(
+                mac_address=self._mac,
+                dfu_package_data=dfu_data,
+                progress_callback=_progress_callback,
+                scan_timeout=30.0,
+            )
+
+            if not success:
+                raise HomeAssistantError("DFU update failed")
+
+            # Step 5: Wait for device to boot new firmware and verify
+            _LOGGER.info(
+                "DFU complete. Waiting for device to boot new firmware..."
+            )
+            await asyncio.sleep(5)
+
+            self._attr_installed_version = target_version
+            self._attr_in_progress = False
+            self.async_write_ha_state()
+
+            _LOGGER.info(
+                "Firmware update complete for %s: now running %s",
+                self._mac,
+                target_version,
+            )
+
+        except Exception:
+            self._attr_in_progress = False
+            self.async_write_ha_state()
+            raise
+        finally:
+            self._is_updating = False
+
+    async def _get_dfu_download_url(self, version: str) -> str | None:
+        """Get download URL for NRF52840.zip from a specific release.
+
+        Args:
+            version: Version tag (e.g., "1.2" or "v1.2")
+
+        Returns:
+            Download URL for NRF52840.zip or None if not found
+        """
+        tags_to_try = (
+            [version, f"v{version}"]
+            if not version.startswith("v")
+            else [version, version[1:]]
+        )
+
+        for tag in tags_to_try:
+            url = (
+                "https://api.github.com/repos/OpenDisplay-org/"
+                f"Firmware/releases/tags/{tag}"
+            )
+            try:
+                async with self._session.get(
+                    url,
+                    headers={
+                        "Accept": "application/vnd.github+json",
+                        "User-Agent": "HomeAssistant-OpenDisplay-DFU",
+                    },
+                ) as resp:
+                    if resp.status != 200:
+                        continue
+                    data = await resp.json()
+
+                    for asset in data.get("assets", []):
+                        if asset.get("name") == "NRF52840.zip":
+                            return asset.get("browser_download_url")
+            except Exception:  # noqa: BLE001
+                continue
+
+        return None

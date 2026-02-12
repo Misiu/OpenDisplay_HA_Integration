@@ -4,6 +4,7 @@ from .color_scheme import ColorScheme
 from .connection import BLEConnection
 from .image_upload import BLEImageUploader
 from .metadata import BLEDeviceMetadata
+from .nrf_dfu import perform_dfu_update, parse_dfu_package
 from .operations import (
     turn_led_on,
     turn_led_off,
@@ -31,6 +32,9 @@ __all__ = [
     "BLEImageUploader",
     # Metadata
     "BLEDeviceMetadata",
+    # NRF DFU
+    "perform_dfu_update",
+    "parse_dfu_package",
     # Operations
     "turn_led_on",
     "turn_led_off",
