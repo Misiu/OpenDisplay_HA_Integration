@@ -230,7 +230,7 @@ class NordicDfuController:
         try:
             await self._client.stop_notify(DFU_CONTROL_POINT_UUID)
         except Exception:  # noqa: BLE001
-            pass
+            _LOGGER.debug("Error stopping DFU notifications", exc_info=True)
 
 
 async def perform_dfu_update(

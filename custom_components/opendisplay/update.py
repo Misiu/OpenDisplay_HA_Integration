@@ -367,6 +367,9 @@ class OpenDisplayBleUpdateEntity(OpenDisplayBLEEntity, UpdateEntity):
                         if asset.get("name") == "NRF52840.zip":
                             return asset.get("browser_download_url")
             except Exception:  # noqa: BLE001
+                _LOGGER.debug(
+                    "Failed to query GitHub release for tag %s", tag, exc_info=True
+                )
                 continue
 
         return None
