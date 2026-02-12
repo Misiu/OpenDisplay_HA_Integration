@@ -31,7 +31,7 @@ jobs:
         id: fetch
         run: python3 scripts/fetch_tag_types.py new_tag_types.json
       
-      - name: Generate updated tag_types.py
+      - name: Generate updated const.py
         id: generate
         run: |
           python3 scripts/generate_tag_types.py new_tag_types.json
@@ -78,7 +78,7 @@ jobs:
           branch: 'automated/sync-tag-definitions'
           delete-branch: true
           add-paths: |
-            custom_components/opendisplay/tag_types.py
+            custom_components/opendisplay/const.py
           labels: |
             automated
             dependencies
