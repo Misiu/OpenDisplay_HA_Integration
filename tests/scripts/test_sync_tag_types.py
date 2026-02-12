@@ -22,26 +22,23 @@ import generate_tag_types
 # Fixtures
 # ---------------------------------------------------------------------------
 
-SAMPLE_TAG_TYPES_PY = textwrap.dedent("""\
-    class Foo:
-        def _load_fallback_types(self):
-            fallback_definitions = {
-                0: {"version": 4, "name": "M2 1.54\\"", "width": 152, "height": 152},
-                1: {"version": 5, "name": "M2 2.9\\"", "width": 296, "height": 128},
-                240: {"version": 2, "name": "SLT\u2010EM007 Segmented", "width": 0, "height": 0},
-                250: {"version": 1, "name": "ConfigMode", "width": 0, "height": 0},
-            }
-            self._tag_types = {
-                type_id: TagType(type_id, data) for type_id, data in fallback_definitions.items()
-            }
+SAMPLE_CONST_PY = textwrap.dedent("""\
+    DOMAIN = "opendisplay"
+    
+    FALLBACK_TAG_DEFINITIONS = {
+        0: {"version": 4, "name": "M2 1.54\\"", "width": 152, "height": 152},
+        1: {"version": 5, "name": "M2 2.9\\"", "width": 296, "height": 128},
+        240: {"version": 2, "name": "SLT\u2010EM007 Segmented", "width": 0, "height": 0},
+        250: {"version": 1, "name": "ConfigMode", "width": 0, "height": 0},
+    }
 """)
 
 
 @pytest.fixture
-def tag_types_file(tmp_path):
-    """Write a minimal tag_types.py and return its path."""
-    p = tmp_path / "tag_types.py"
-    p.write_text(SAMPLE_TAG_TYPES_PY)
+def const_file(tmp_path):
+    """Write a minimal const.py and return its path."""
+    p = tmp_path / "const.py"
+    p.write_text(SAMPLE_CONST_PY)
     return p
 
 
@@ -83,23 +80,23 @@ class TestLoadNewTagTypes:
 # ---------------------------------------------------------------------------
 
 class TestParseCurrentDefinitions:
-    """Tests for parsing fallback_definitions from tag_types.py."""
+    """Tests for parsing FALLBACK_TAG_DEFINITIONS from const.py."""
 
-    def test_parses_all_entries(self, tag_types_file):
-        """Should parse all entries from the fallback_definitions block."""
-        content = tag_types_file.read_text()
+    def test_parses_all_entries(self, const_file):
+        """Should parse all entries from the FALLBACK_TAG_DEFINITIONS block."""
+        content = const_file.read_text()
         result = generate_tag_types.parse_current_definitions(content)
         assert len(result) == 4
         assert set(result.keys()) == {0, 1, 240, 250}
 
-    def test_keys_are_integers(self, tag_types_file):
+    def test_keys_are_integers(self, const_file):
         """Parsed keys must be integers."""
-        content = tag_types_file.read_text()
+        content = const_file.read_text()
         result = generate_tag_types.parse_current_definitions(content)
         assert all(isinstance(k, int) for k in result.keys())
 
     def test_exits_on_missing_block(self):
-        """Should exit if fallback_definitions block is not found."""
+        """Should exit if FALLBACK_TAG_DEFINITIONS block is not found."""
         with pytest.raises(SystemExit):
             generate_tag_types.parse_current_definitions("no such block here")
 
@@ -166,13 +163,13 @@ class TestComputeChanges:
 # ---------------------------------------------------------------------------
 
 class TestGenerateFallbackContent:
-    """Tests for generating the fallback_definitions dict content."""
+    """Tests for generating the FALLBACK_TAG_DEFINITIONS dict content."""
 
     def test_format(self):
-        """Each line should have 12-space indent, type_id, JSON data, and trailing comma."""
+        """Each line should have 4-space indent, type_id, JSON data, and trailing comma."""
         data = {0: {"version": 1, "name": "Tag", "width": 10, "height": 20}}
         content = generate_tag_types.generate_fallback_content(data)
-        assert content.startswith("            0:")
+        assert content.startswith("    0:")
         assert content.endswith(",")
 
     def test_sorted_numerically(self):
@@ -203,39 +200,38 @@ class TestGenerateFallbackContent:
 # ---------------------------------------------------------------------------
 
 class TestUpdateTagTypesFile:
-    """Tests for replacing fallback_definitions in file content."""
+    """Tests for replacing FALLBACK_TAG_DEFINITIONS in file content."""
 
-    def test_replaces_content(self, tag_types_file):
+    def test_replaces_content(self, const_file):
         """The fallback block should be replaced with new content."""
-        content = tag_types_file.read_text()
-        new_fallback = '            999: {"version": 1, "name": "New", "width": 1, "height": 1},'
+        content = const_file.read_text()
+        new_fallback = '    999: {"version": 1, "name": "New", "width": 1, "height": 1},'
         result = generate_tag_types.update_tag_types_file(content, new_fallback)
         assert "999:" in result
         # Old entries removed
         assert "250:" not in result
 
-    def test_preserves_surrounding_code(self, tag_types_file):
-        """Code around fallback_definitions should be unchanged."""
-        content = tag_types_file.read_text()
-        new_fallback = '            999: {"version": 1, "name": "New", "width": 1, "height": 1},'
+    def test_preserves_surrounding_code(self, const_file):
+        """Code around FALLBACK_TAG_DEFINITIONS should be unchanged."""
+        content = const_file.read_text()
+        new_fallback = '    999: {"version": 1, "name": "New", "width": 1, "height": 1},'
         result = generate_tag_types.update_tag_types_file(content, new_fallback)
-        assert "class Foo:" in result
-        assert "self._tag_types" in result
+        assert "DOMAIN" in result
 
-    def test_unicode_in_replacement(self, tag_types_file):
+    def test_unicode_in_replacement(self, const_file):
         """Unicode escape sequences in replacement must not cause regex errors.
 
         This is the primary bug that was fixed: json.dumps() produces \\uXXXX
         sequences which re.sub() would interpret as bad regex escapes.
         """
-        content = tag_types_file.read_text()
+        content = const_file.read_text()
         # This would fail with re.sub() because \u2010 is a bad regex escape
-        new_fallback = '            240: {"version": 2, "name": "SLT\\u2010EM007", "width": 0, "height": 0},'
+        new_fallback = '    240: {"version": 2, "name": "SLT\\u2010EM007", "width": 0, "height": 0},'
         result = generate_tag_types.update_tag_types_file(content, new_fallback)
         assert "\\u2010" in result
 
     def test_exits_on_missing_block(self):
-        """Should exit if fallback_definitions block is not found."""
+        """Should exit if FALLBACK_TAG_DEFINITIONS block is not found."""
         with pytest.raises(SystemExit):
             generate_tag_types.update_tag_types_file("no such block", "replacement")
 
@@ -289,17 +285,17 @@ class TestSetGithubOutput:
 class TestMainIntegration:
     """Integration tests for the full generate_tag_types.main() flow."""
 
-    def test_no_change_run(self, tag_types_file, new_types_json, tmp_path):
+    def test_no_change_run(self, const_file, new_types_json, tmp_path):
         """When data matches, output changed=false."""
         output_file = tmp_path / "output.txt"
         output_file.write_text("")
-        with patch.object(generate_tag_types, "TAG_TYPES_PATH", str(tag_types_file)), \
+        with patch.object(generate_tag_types, "CONST_PATH", str(const_file)), \
              patch.dict(os.environ, {"GITHUB_OUTPUT": str(output_file)}), \
              patch("sys.argv", ["prog", str(new_types_json)]):
             generate_tag_types.main()
         assert "changed=false" in output_file.read_text()
 
-    def test_added_type_run(self, tag_types_file, tmp_path):
+    def test_added_type_run(self, const_file, tmp_path):
         """When a new type is added, output changed=true and file is updated."""
         data = {
             0: {"version": 4, "name": 'M2 1.54"', "width": 152, "height": 152},
@@ -313,12 +309,12 @@ class TestMainIntegration:
 
         output_file = tmp_path / "output.txt"
         output_file.write_text("")
-        with patch.object(generate_tag_types, "TAG_TYPES_PATH", str(tag_types_file)), \
+        with patch.object(generate_tag_types, "CONST_PATH", str(const_file)), \
              patch.dict(os.environ, {"GITHUB_OUTPUT": str(output_file)}), \
              patch("sys.argv", ["prog", str(json_file)]):
             generate_tag_types.main()
         assert "changed=true" in output_file.read_text()
-        updated = tag_types_file.read_text()
+        updated = const_file.read_text()
         assert "999:" in updated
         assert "Brand New" in updated
 
