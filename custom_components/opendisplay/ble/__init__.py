@@ -2,6 +2,7 @@
 from .color_scheme import ColorScheme
 # Re-export key classes and functions for backward compatibility
 from .connection import BLEConnection
+from .esp32_ota import perform_esp32_ota
 from .image_upload import BLEImageUploader
 from .metadata import BLEDeviceMetadata
 from .nrf_dfu import perform_dfu_update, parse_dfu_package
@@ -35,6 +36,8 @@ __all__ = [
     # NRF DFU
     "perform_dfu_update",
     "parse_dfu_package",
+    # ESP32 OTA
+    "perform_esp32_ota",
     # Operations
     "turn_led_on",
     "turn_led_off",

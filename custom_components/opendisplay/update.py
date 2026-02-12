@@ -18,6 +18,7 @@ from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .ble import BLEConnection, BLEDeviceMetadata, get_protocol_by_name
+from .ble.esp32_ota import perform_esp32_ota
 from .ble.nrf_dfu import parse_dfu_package, perform_dfu_update
 from .ble.protocol_open_display import OpenDisplayProtocol
 from .const import DOMAIN
@@ -30,6 +31,21 @@ _LOGGER = logging.getLogger(__name__)
 GITHUB_LATEST_URL = "https://api.github.com/repos/OpenDisplay-org/Firmware/releases/latest"
 DEFAULT_RELEASE_URL = "https://github.com/OpenDisplay-org/Firmware/releases"
 CACHE_DURATION = timedelta(hours=6)
+
+# IC type values from OpenDisplay TLV config (system.ic_type)
+IC_TYPE_NRF52840 = 1
+IC_TYPE_ESP32_S3 = 2
+IC_TYPE_ESP32_C3 = 3
+IC_TYPE_ESP32_C6 = 4
+
+# Mapping from IC type to firmware asset search prefix for GitHub releases.
+# NRF52840 uses the DFU .zip package; ESP32 variants use application .bin.
+_IC_TYPE_ASSET_PREFIXES: dict[int, str] = {
+    IC_TYPE_NRF52840: "NRF52840",
+    IC_TYPE_ESP32_S3: "esp32-s3-",
+    IC_TYPE_ESP32_C3: "esp32-c3-",
+    IC_TYPE_ESP32_C6: "esp32-c6-",
+}
 
 
 async def async_setup_entry(
@@ -215,6 +231,15 @@ class OpenDisplayBleUpdateEntity(OpenDisplayBLEEntity, UpdateEntity):
             else:
                 _LOGGER.debug("Failed to fetch OpenDisplay firmware latest version: %s", msg)
 
+    def _get_ic_type(self) -> int | None:
+        """Return IC type from device metadata, or None if unavailable."""
+        metadata_dict = self._entry_data.device_metadata or {}
+        config = metadata_dict.get("open_display_config", {})
+        system = config.get("system")
+        if system:
+            return system.get("ic_type")
+        return None
+
     def version_is_newer(self, latest_version: str, installed_version: str) -> bool:
         """Use AwesomeVersion for comparison."""
         try:
@@ -225,14 +250,11 @@ class OpenDisplayBleUpdateEntity(OpenDisplayBLEEntity, UpdateEntity):
     async def async_install(
         self, version: str | None, backup: bool, **kwargs
     ) -> None:
-        """Install firmware update via BLE DFU.
+        """Install firmware update via BLE OTA.
 
-        Steps:
-        1. Download DFU package (.zip) from GitHub release
-        2. Connect to device and send DFU mode command (0x0044)
-        3. Wait for device to reset into DFU bootloader
-        4. Connect to DFU bootloader and flash firmware
-        5. Verify update by reading firmware version
+        The update method depends on the device IC type:
+        - NRF52840: Download .zip DFU package → enter DFU bootloader → Nordic DFU protocol
+        - ESP32-S3/C3/C6: Download .bin → stream via BLE OTA commands (0x0046/47/48)
         """
         if self._is_updating:
             _LOGGER.warning("Update already in progress for %s", self._mac)
@@ -241,79 +263,31 @@ class OpenDisplayBleUpdateEntity(OpenDisplayBLEEntity, UpdateEntity):
         self._is_updating = True
 
         try:
-            # Step 1: Download DFU package from GitHub
             target_version = version or self._latest_version
             if not target_version:
                 raise HomeAssistantError("No target version available")
 
-            dfu_url = await self._get_dfu_download_url(target_version)
-            if not dfu_url:
-                raise HomeAssistantError(
-                    f"Could not find NRF52840.zip in release {target_version}"
-                )
+            ic_type = self._get_ic_type()
+            _LOGGER.info(
+                "Starting OTA for %s (ic_type=%s, version=%s)",
+                self._mac,
+                ic_type,
+                target_version,
+            )
 
-            _LOGGER.info("Downloading DFU package from %s", dfu_url)
-            async with self._session.get(dfu_url) as resp:
-                if resp.status != 200:
-                    raise HomeAssistantError(
-                        f"Failed to download DFU package: HTTP {resp.status}"
-                    )
-                dfu_data = await resp.read()
-
-            _LOGGER.info("Downloaded DFU package: %d bytes", len(dfu_data))
-
-            # Validate it's a valid DFU package
-            try:
-                parse_dfu_package(dfu_data)
-            except ValueError as err:
-                raise HomeAssistantError(
-                    f"Invalid DFU package: {err}"
-                ) from err
-
-            # Step 2: Connect and send DFU mode command
-            protocol = get_protocol_by_name("open_display")
-            assert isinstance(protocol, OpenDisplayProtocol)
-
-            _LOGGER.info("Sending DFU mode command to %s", self._mac)
             self._attr_in_progress = True
             self.async_write_ha_state()
 
-            async with BLEConnection(
-                self.hass, self._mac, protocol.service_uuid, protocol
-            ) as conn:
-                success = await protocol.enter_dfu_mode(conn)
-                if not success:
-                    raise HomeAssistantError(
-                        "Device rejected DFU mode command"
-                        " (may not be NRF52840)"
-                    )
+            if ic_type == IC_TYPE_NRF52840:
+                await self._install_nrf52840(target_version)
+            elif ic_type in (IC_TYPE_ESP32_S3, IC_TYPE_ESP32_C3, IC_TYPE_ESP32_C6):
+                await self._install_esp32(target_version, ic_type)
+            else:
+                raise HomeAssistantError(
+                    f"Unknown IC type {ic_type} — cannot determine OTA method"
+                )
 
-            # Step 3: Wait for device to reset into bootloader
-            _LOGGER.info("Waiting for device to enter DFU bootloader...")
-            await asyncio.sleep(3)
-
-            # Step 4: Perform DFU flash
-            def _progress_callback(bytes_sent, total_bytes):
-                progress = int((bytes_sent / total_bytes) * 100)
-                self._attr_in_progress = progress
-                self.async_write_ha_state()
-
-            success = await perform_dfu_update(
-                mac_address=self._mac,
-                dfu_package_data=dfu_data,
-                progress_callback=_progress_callback,
-                scan_timeout=30.0,
-            )
-
-            if not success:
-                raise HomeAssistantError("DFU update failed")
-
-            # Step 5: Wait for device to boot new firmware and verify
-            _LOGGER.info(
-                "DFU complete. Waiting for device to boot new firmware..."
-            )
-            await asyncio.sleep(5)
-
+            # Mark update as complete
             self._attr_installed_version = target_version
             self._attr_in_progress = False
             self.async_write_ha_state()
@@ -331,15 +305,149 @@ class OpenDisplayBleUpdateEntity(OpenDisplayBLEEntity, UpdateEntity):
         finally:
             self._is_updating = False
 
-    async def _get_dfu_download_url(self, version: str) -> str | None:
-        """Get download URL for NRF52840.zip from a specific release.
+    # ------------------------------------------------------------------
+    # NRF52840: Nordic DFU via bootloader
+    # ------------------------------------------------------------------
+
+    async def _install_nrf52840(self, target_version: str) -> None:
+        """Install firmware on NRF52840 via Nordic DFU bootloader."""
+        # Download DFU package
+        dfu_url = await self._get_firmware_download_url(
+            target_version, IC_TYPE_NRF52840
+        )
+        if not dfu_url:
+            raise HomeAssistantError(
+                f"Could not find NRF52840.zip in release {target_version}"
+            )
+
+        _LOGGER.info("Downloading NRF52840 DFU package from %s", dfu_url)
+        async with self._session.get(dfu_url) as resp:
+            if resp.status != 200:
+                raise HomeAssistantError(
+                    f"Failed to download DFU package: HTTP {resp.status}"
+                )
+            dfu_data = await resp.read()
+
+        _LOGGER.info("Downloaded DFU package: %d bytes", len(dfu_data))
+
+        # Validate package structure
+        try:
+            parse_dfu_package(dfu_data)
+        except ValueError as err:
+            raise HomeAssistantError(f"Invalid DFU package: {err}") from err
+
+        # Enter DFU bootloader via command 0x0044
+        protocol = get_protocol_by_name("open_display")
+        assert isinstance(protocol, OpenDisplayProtocol)
+
+        _LOGGER.info("Sending DFU mode command to %s", self._mac)
+        async with BLEConnection(
+            self.hass, self._mac, protocol.service_uuid, protocol
+        ) as conn:
+            success = await protocol.enter_dfu_mode(conn)
+            if not success:
+                raise HomeAssistantError(
+                    "Device rejected DFU mode command (may not be NRF52840)"
+                )
+
+        # Wait for device to reset into bootloader
+        _LOGGER.info("Waiting for device to enter DFU bootloader...")
+        await asyncio.sleep(3)
+
+        # Perform Nordic DFU flash
+        def _progress_callback(bytes_sent, total_bytes):
+            progress = int((bytes_sent / total_bytes) * 100)
+            self._attr_in_progress = progress
+            self.async_write_ha_state()
+
+        success = await perform_dfu_update(
+            mac_address=self._mac,
+            dfu_package_data=dfu_data,
+            progress_callback=_progress_callback,
+            scan_timeout=30.0,
+        )
+        if not success:
+            raise HomeAssistantError("NRF52840 DFU update failed")
+
+        _LOGGER.info("NRF52840 DFU complete, waiting for reboot...")
+        await asyncio.sleep(5)
+
+    # ------------------------------------------------------------------
+    # ESP32: BLE OTA via commands 0x0046/0x0047/0x0048
+    # ------------------------------------------------------------------
+
+    async def _install_esp32(self, target_version: str, ic_type: int) -> None:
+        """Install firmware on ESP32 via BLE OTA protocol."""
+        fw_url = await self._get_firmware_download_url(target_version, ic_type)
+        if not fw_url:
+            chip_name = {
+                IC_TYPE_ESP32_S3: "ESP32-S3",
+                IC_TYPE_ESP32_C3: "ESP32-C3",
+                IC_TYPE_ESP32_C6: "ESP32-C6",
+            }.get(ic_type, f"ic_type={ic_type}")
+            raise HomeAssistantError(
+                f"Could not find firmware .bin for {chip_name}"
+                f" in release {target_version}"
+            )
+
+        _LOGGER.info("Downloading ESP32 firmware from %s", fw_url)
+        async with self._session.get(fw_url) as resp:
+            if resp.status != 200:
+                raise HomeAssistantError(
+                    f"Failed to download firmware: HTTP {resp.status}"
+                )
+            fw_data = await resp.read()
+
+        _LOGGER.info("Downloaded ESP32 firmware: %d bytes", len(fw_data))
+
+        if len(fw_data) == 0:
+            raise HomeAssistantError("Downloaded firmware file is empty")
+
+        # Stream firmware over BLE
+        protocol = get_protocol_by_name("open_display")
+        assert isinstance(protocol, OpenDisplayProtocol)
+
+        def _progress_callback(bytes_sent, total_bytes):
+            progress = int((bytes_sent / total_bytes) * 100)
+            self._attr_in_progress = progress
+            self.async_write_ha_state()
+
+        async with BLEConnection(
+            self.hass, self._mac, protocol.service_uuid, protocol
+        ) as conn:
+            await perform_esp32_ota(
+                connection=conn,
+                firmware_data=fw_data,
+                progress_callback=_progress_callback,
+            )
+
+        _LOGGER.info("ESP32 OTA complete, waiting for reboot...")
+        await asyncio.sleep(5)
+
+    # ------------------------------------------------------------------
+    # Firmware asset resolution
+    # ------------------------------------------------------------------
+
+    async def _get_firmware_download_url(
+        self, version: str, ic_type: int
+    ) -> str | None:
+        """Find the download URL for the correct firmware asset.
+
+        For NRF52840 this looks for ``NRF52840.zip``.
+        For ESP32 variants this looks for ``esp32-{variant}-*.bin``
+        (excluding ``*_full.bin`` merged images).
 
         Args:
-            version: Version tag (e.g., "1.2" or "v1.2")
+            version: Release version tag (e.g. "1.2" or "v1.2")
+            ic_type: Device IC type constant
 
         Returns:
-            Download URL for NRF52840.zip or None if not found
+            Browser download URL for the asset, or *None* if not found.
         """
+        prefix = _IC_TYPE_ASSET_PREFIXES.get(ic_type)
+        if prefix is None:
+            return None
+
         tags_to_try = (
             [version, f"v{version}"]
             if not version.startswith("v")
@@ -356,7 +464,7 @@ class OpenDisplayBleUpdateEntity(OpenDisplayBLEEntity, UpdateEntity):
                     url,
                     headers={
                         "Accept": "application/vnd.github+json",
-                        "User-Agent": "HomeAssistant-OpenDisplay-DFU",
+                        "User-Agent": "HomeAssistant-OpenDisplay-OTA",
                     },
                 ) as resp:
                     if resp.status != 200:
@@ -364,11 +472,25 @@ class OpenDisplayBleUpdateEntity(OpenDisplayBLEEntity, UpdateEntity):
                     data = await resp.json()
 
                     for asset in data.get("assets", []):
-                        if asset.get("name") == "NRF52840.zip":
-                            return asset.get("browser_download_url")
+                        name = asset.get("name", "")
+                        if ic_type == IC_TYPE_NRF52840:
+                            # Exact match for NRF52840.zip
+                            if name == "NRF52840.zip":
+                                return asset.get("browser_download_url")
+                        else:
+                            # ESP32: match prefix, must end with .bin,
+                            # skip merged *_full.bin images
+                            if (
+                                name.startswith(prefix)
+                                and name.endswith(".bin")
+                                and not name.endswith("_full.bin")
+                            ):
+                                return asset.get("browser_download_url")
             except Exception:  # noqa: BLE001
                 _LOGGER.debug(
-                    "Failed to query GitHub release for tag %s", tag, exc_info=True
+                    "Failed to query GitHub release for tag %s",
+                    tag,
+                    exc_info=True,
                 )
                 continue
 

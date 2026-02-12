@@ -279,7 +279,7 @@
   "preview_features": {
     "opendisplay_ble_updates": {
       "name": "OpenDisplay firmware updates",
-      "description": "Shows a firmware update entity for OpenDisplay BLE tags that compares the installed firmware to the latest OpenDisplay_BLE GitHub release. Supports OTA DFU firmware installation for NRF52840 devices."
+      "description": "Shows a firmware update entity for OpenDisplay BLE tags that compares the installed firmware to the latest GitHub release. Supports OTA installation for NRF52840 (Nordic DFU) and ESP32 (BLE OTA) devices."
     }
   },
   "exceptions": {
@@ -381,6 +381,10 @@
     "dfu_mode_rejected": { "message": "Device {mac_address} rejected DFU mode command. The device may not be an NRF52840 or may not support OTA updates." },
     "dfu_bootloader_not_found": { "message": "DFU bootloader not found for {mac_address} after {timeout}s. The device may have failed to enter DFU mode." },
     "dfu_flash_failed": { "message": "DFU firmware flash failed for {mac_address}: {error}." },
-    "dfu_update_failed": { "message": "Firmware update failed for {mac_address}: {error}." }
+    "dfu_update_failed": { "message": "Firmware update failed for {mac_address}: {error}." },
+    "esp32_ota_rejected": { "message": "Device {mac_address} rejected ESP32 OTA command: {error}." },
+    "esp32_ota_failed": { "message": "ESP32 OTA update failed for {mac_address}: {error}." },
+    "ota_unknown_ic_type": { "message": "Unknown IC type {ic_type} for {mac_address}. Cannot determine OTA method." },
+    "ota_firmware_not_found": { "message": "Could not find firmware asset for {chip_name} in release {version}." }
   }
 }

@@ -22,8 +22,11 @@ CMD_READ_CONFIG = bytes([0x00, 0x40])
 CMD_READ_FW_VERSION = bytes([0x00, 0x43])
 CMD_ENTER_DFU_OTA = bytes([0x00, 0x44])
 CMD_ENTER_DFU_SERIAL = bytes([0x00, 0x45])
+CMD_OTA_START = bytes([0x00, 0x46])
+CMD_OTA_DATA = bytes([0x00, 0x47])
+CMD_OTA_END = bytes([0x00, 0x48])
 
-# DFU response codes
+# Response codes
 RESP_SUCCESS = 0x00
 RESP_ERROR = 0xFF
 
