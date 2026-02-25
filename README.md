@@ -1,8 +1,8 @@
 # OpenDisplay integration for Home Assistant
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg?style=for-the-badge)](https://github.com/hacs/integration)
-[![GitHub release (latest by date)](https://img.shields.io/github/v/release/OpenDisplay-org/Home_Assistant_Integration?style=for-the-badge)](https://github.com/OpenDisplay/Home_Assistant_Integration/releases)
-[![GitHub issues](https://img.shields.io/github/issues/OpenDisplay-org/Home_Assistant_Integration?style=for-the-badge)](https://github.com/OpenDisplay/Home_Assistant_Integration/issues)
+[![GitHub release (latest by date)](https://img.shields.io/github/v/release/OpenDisplay/Home_Assistant_Integration?style=for-the-badge)](https://github.com/OpenDisplay/Home_Assistant_Integration/releases)
+[![GitHub issues](https://img.shields.io/github/issues/OpenDisplay/Home_Assistant_Integration?style=for-the-badge)](https://github.com/OpenDisplay/Home_Assistant_Integration/issues)
 ![Discord](https://img.shields.io/discord/1453066942544875593?style=for-the-badge)
 
 
@@ -39,7 +39,7 @@ The most flexible and powerful service for creating custom displays. Supports:
 [![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=OpenDisplay-org&repository=Home_Assistant_Integration)
 
 ### Option 2: Manual Installation
-1. Download the `opendisplay` folder from the [latest release](https://github.com/OpenDisplay-org/Home_Assistant_Integration/releases/latest)
+1. Download the `opendisplay` folder from the [latest release](https://github.com/OpenDisplay/Home_Assistant_Integration/releases/latest)
 2. Copy it to your [`custom_components` folder](https://developers.home-assistant.io/docs/creating_integration_file_structure/#where-home-assistant-looks-for-integrations)
 3. Restart Home Assistant
 
