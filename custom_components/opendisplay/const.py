@@ -58,7 +58,7 @@ FALLBACK_TAG_DEFINITIONS = {
     77: {"version": 3, "name": "M3 11.6\" BWRY", "width": 960, "height": 640},
     78: {"version": 2, "name": "M3 2.6\" BW", "width": 360, "height": 184},
     79: {"version": 1, "name": "M3 2.6\" BWRY", "width": 360, "height": 184},
-    80: {"version": 2, "name": "HD150 5.83\" BWR", "width": 648, "height": 480},
+    80: {"version": 4, "name": "HD150 5.83\" BWR", "width": 648, "height": 480},
     84: {"version": 4, "name": "HS BW 2.13\"", "width": 256, "height": 128},
     85: {"version": 5, "name": "HS BWR 2.13\"", "width": 256, "height": 128},
     86: {"version": 6, "name": "HS BWR 2.66\"", "width": 296, "height": 152},
