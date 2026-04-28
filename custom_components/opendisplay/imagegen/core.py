@@ -303,7 +303,7 @@ class ImageGen:
 
         return element.get("visible", True)
 
-    async def _async_prefetch_resources(self, payload: list, resources: dict) -> None:
+    async def _async_prefetch_resources(self, payload: list) -> None:
         """Pre-fetch async resources needed by elements in *payload*.
 
         Only elements that require data from the HA event loop (recorder history)
@@ -465,7 +465,7 @@ class ImageGen:
         payload = service_data.get("payload", [])
 
         # Phase 1 (event loop): pre-fetch data that needs async access
-        await self._async_prefetch_resources(payload, {})
+        await self._async_prefetch_resources(payload)
 
         # Phase 2 (executor thread): all CPU-intensive PIL work
         image_data = await self.hass.async_add_executor_job(

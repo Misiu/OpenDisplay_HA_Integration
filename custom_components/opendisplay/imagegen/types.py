@@ -77,3 +77,10 @@ class DrawingContext:
     hass: "HomeAssistant"
     pos_y: int = 0
     resources: dict = field(default_factory=dict)
+    """Per-call pre-fetched data shared across handlers.
+
+    Populated by the async pre-fetch phase in :meth:`ImageGen._async_prefetch_resources`
+    before the synchronous drawing phase runs in an executor thread.  Handlers
+    that need shared resources (e.g. MDI icon metadata) can read from this dict
+    instead of performing I/O themselves.
+    """
