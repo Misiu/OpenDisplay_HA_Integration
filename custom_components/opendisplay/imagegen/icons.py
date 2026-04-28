@@ -40,7 +40,7 @@ async def draw_icon(ctx: DrawingContext, element: dict) -> None:
 
     # Load MDI font and metadata
     font_file = os.path.join(_ASSETS_DIR, "materialdesignicons-webfont.ttf")
-    meta_file = os.path.join(_ASSETS_DIR, "materialdesignicons-webfont_meta.json")
+    meta_file = os.path.join(_ASSETS_DIR, "materialdesignicons-webfont.meta.json")
 
     try:
         def load_meta():
@@ -60,19 +60,7 @@ async def draw_icon(ctx: DrawingContext, element: dict) -> None:
     if icon_name.startswith("mdi:"):
         icon_name = icon_name[4:]
 
-    chr_hex = None
-    # Search direct matches
-    for icon in mdi_data:
-        if icon['name'] == icon_name:
-            chr_hex = icon['codepoint']
-            break
-
-    # Search aliases if no direct match
-    if not chr_hex:
-        for icon in mdi_data:
-            if 'aliases' in icon and icon_name in icon['aliases']:
-                chr_hex = icon['codepoint']
-                break
+    chr_hex = mdi_data.get(icon_name)
 
     if not chr_hex:
         raise HomeAssistantError(
@@ -153,7 +141,7 @@ async def draw_icon_sequence(ctx: DrawingContext, element: dict) -> None:
 
     # Load MDI font and metadata
     font_file = os.path.join(_ASSETS_DIR, "materialdesignicons-webfont.ttf")
-    meta_file = os.path.join(_ASSETS_DIR, "materialdesignicons-webfont_meta.json")
+    meta_file = os.path.join(_ASSETS_DIR, "materialdesignicons-webfont.meta.json")
 
     try:
         def load_meta():
@@ -185,19 +173,7 @@ async def draw_icon_sequence(ctx: DrawingContext, element: dict) -> None:
             icon_name = icon_name[4:]
 
         # Find icon codepoint
-        chr_hex = None
-        # Search direct matches
-        for icon in mdi_data:
-            if icon['name'] == icon_name:
-                chr_hex = icon['codepoint']
-                break
-
-        # Search aliases if no direct match
-        if not chr_hex:
-            for icon in mdi_data:
-                if 'aliases' in icon and icon_name in icon['aliases']:
-                    chr_hex = icon['codepoint']
-                    break
+        chr_hex = mdi_data.get(icon_name)
 
         if not chr_hex:
             _LOGGER.warning(f"Invalid icon name: {icon_name}")
