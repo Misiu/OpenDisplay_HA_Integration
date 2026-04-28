@@ -23,8 +23,10 @@ def mock_hass():
     """Create a mock Home Assistant instance."""
     hass = MagicMock(spec=HomeAssistant)
 
-    # Mock async_add_executor_job
-    hass.async_add_executor_job = AsyncMock()
+    # Mock async_add_executor_job to actually call the function (so PIL rendering works in tests)
+    async def mock_executor_job(func, *args, **kwargs):
+        return func(*args, **kwargs)
+    hass.async_add_executor_job = mock_executor_job
 
     # Mock async_create_task to properly await coroutines
     async def mock_create_task(coro, name=None):

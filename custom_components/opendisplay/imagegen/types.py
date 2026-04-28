@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING
 
@@ -76,3 +76,4 @@ class DrawingContext:
     fonts: "FontManager"
     hass: "HomeAssistant"
     pos_y: int = 0
+    resources: dict = field(default_factory=dict)

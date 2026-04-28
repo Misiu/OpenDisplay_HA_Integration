@@ -15,9 +15,43 @@ from ..const import DOMAIN
 _LOGGER = logging.getLogger(__name__)
 _ASSETS_DIR = os.path.join(os.path.dirname(__file__), "assets")
 
+# Module-level cache for MDI metadata and fonts.
+# Loaded once from disk (in the executor thread) and reused on every subsequent call.
+_mdi_metadata_cache: list | None = None
+_mdi_font_cache: dict[int, ImageFont.FreeTypeFont] = {}
+
+
+def _get_mdi_metadata() -> list:
+    """Return the MDI icon metadata, loading from disk on the first call."""
+    global _mdi_metadata_cache
+    if _mdi_metadata_cache is None:
+        meta_file = os.path.join(_ASSETS_DIR, "materialdesignicons-webfont_meta.json")
+        with open(meta_file, "r", encoding="utf-8") as f:
+            _mdi_metadata_cache = json.load(f)
+    return _mdi_metadata_cache
+
+
+def _get_mdi_font(size: int) -> ImageFont.FreeTypeFont:
+    """Return the MDI font at the given size, loading from disk on the first call."""
+    if size not in _mdi_font_cache:
+        font_file = os.path.join(_ASSETS_DIR, "materialdesignicons-webfont.ttf")
+        _mdi_font_cache[size] = ImageFont.truetype(font_file, size)
+    return _mdi_font_cache[size]
+
+
+def _find_icon_codepoint(mdi_data: list, icon_name: str) -> str | None:
+    """Search MDI metadata for *icon_name* and return its hex codepoint or None."""
+    for icon in mdi_data:
+        if icon["name"] == icon_name:
+            return icon["codepoint"]
+    for icon in mdi_data:
+        if "aliases" in icon and icon_name in icon["aliases"]:
+            return icon["codepoint"]
+    return None
+
 
 @element_handler(ElementType.ICON, requires=["x", "y", "value", "size"])
-async def draw_icon(ctx: DrawingContext, element: dict) -> None:
+def draw_icon(ctx: DrawingContext, element: dict) -> None:
     """
     Draw Material Design Icons.
 
@@ -27,7 +61,6 @@ async def draw_icon(ctx: DrawingContext, element: dict) -> None:
     Args:
         ctx: Drawing context
         element: Element dictionary with icon properties
-        pos_y: Current Y position for automatic positioning
     Raises:
         HomeAssistantError: If icon name is invalid or rendering fails
     """
@@ -38,16 +71,9 @@ async def draw_icon(ctx: DrawingContext, element: dict) -> None:
     x = ctx.coords.parse_x(element['x'])
     y = ctx.coords.parse_y(element['y'])
 
-    # Load MDI font and metadata
-    font_file = os.path.join(_ASSETS_DIR, "materialdesignicons-webfont.ttf")
-    meta_file = os.path.join(_ASSETS_DIR, "materialdesignicons-webfont_meta.json")
-
+    # Load MDI metadata from the module-level cache (disk read only on first call)
     try:
-        def load_meta():
-            with open(meta_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
-
-        mdi_data = await ctx.hass.async_add_executor_job(load_meta)
+        mdi_data = _get_mdi_metadata()
     except Exception as e:
         raise HomeAssistantError(
             translation_domain=DOMAIN,
@@ -60,19 +86,7 @@ async def draw_icon(ctx: DrawingContext, element: dict) -> None:
     if icon_name.startswith("mdi:"):
         icon_name = icon_name[4:]
 
-    chr_hex = None
-    # Search direct matches
-    for icon in mdi_data:
-        if icon['name'] == icon_name:
-            chr_hex = icon['codepoint']
-            break
-
-    # Search aliases if no direct match
-    if not chr_hex:
-        for icon in mdi_data:
-            if 'aliases' in icon and icon_name in icon['aliases']:
-                chr_hex = icon['codepoint']
-                break
+    chr_hex = _find_icon_codepoint(mdi_data, icon_name)
 
     if not chr_hex:
         raise HomeAssistantError(
@@ -81,11 +95,8 @@ async def draw_icon(ctx: DrawingContext, element: dict) -> None:
             translation_placeholders={"icon_name": icon_name}
         )
 
-    # Get icon properties
-    def load_font():
-        return ImageFont.truetype(font_file, element['size'])
-
-    font = await ctx.hass.async_add_executor_job(load_font)
+    # Load font from the module-level cache (disk read only on first call per size)
+    font = _get_mdi_font(element['size'])
     anchor = element.get('anchor', "la")
     fill = ctx.colors.resolve(
         element.get('color') or element.get('fill', "black")
@@ -124,7 +135,7 @@ async def draw_icon(ctx: DrawingContext, element: dict) -> None:
 
 
 @element_handler(ElementType.ICON_SEQUENCE, requires=["x", "y", "icons", "size"])
-async def draw_icon_sequence(ctx: DrawingContext, element: dict) -> None:
+def draw_icon_sequence(ctx: DrawingContext, element: dict) -> None:
     """
     Draw a sequence of icons in a specified direction.
 
@@ -151,16 +162,9 @@ async def draw_icon_sequence(ctx: DrawingContext, element: dict) -> None:
     stroke_fill = ctx.colors.resolve(element.get('stroke_fill', 'white'))
     direction = element.get('direction', 'right')  # right, down, up, left
 
-    # Load MDI font and metadata
-    font_file = os.path.join(_ASSETS_DIR, "materialdesignicons-webfont.ttf")
-    meta_file = os.path.join(_ASSETS_DIR, "materialdesignicons-webfont_meta.json")
-
+    # Load MDI metadata and font from the module-level caches
     try:
-        def load_meta():
-            with open(meta_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
-
-        mdi_data = await ctx.hass.async_add_executor_job(load_meta)
+        mdi_data = _get_mdi_metadata()
     except Exception as e:
         raise HomeAssistantError(
             translation_domain=DOMAIN,
@@ -168,11 +172,7 @@ async def draw_icon_sequence(ctx: DrawingContext, element: dict) -> None:
             translation_placeholders={"error": str(e)}
         )
 
-    # Load font
-    def load_font():
-        return ImageFont.truetype(font_file, size)
-
-    font = await ctx.hass.async_add_executor_job(load_font)
+    font = _get_mdi_font(size)
 
     max_y = y_start
     max_x = x_start
@@ -184,20 +184,7 @@ async def draw_icon_sequence(ctx: DrawingContext, element: dict) -> None:
         if icon_name.startswith("mdi:"):
             icon_name = icon_name[4:]
 
-        # Find icon codepoint
-        chr_hex = None
-        # Search direct matches
-        for icon in mdi_data:
-            if icon['name'] == icon_name:
-                chr_hex = icon['codepoint']
-                break
-
-        # Search aliases if no direct match
-        if not chr_hex:
-            for icon in mdi_data:
-                if 'aliases' in icon and icon_name in icon['aliases']:
-                    chr_hex = icon['codepoint']
-                    break
+        chr_hex = _find_icon_codepoint(mdi_data, icon_name)
 
         if not chr_hex:
             _LOGGER.warning(f"Invalid icon name: {icon_name}")

@@ -13,7 +13,7 @@ _LOGGER = logging.getLogger(__name__)
 
 
 @element_handler(ElementType.TEXT, requires=["x", "value"])
-async def draw_text(ctx: DrawingContext, element: dict) -> None:
+def draw_text(ctx: DrawingContext, element: dict) -> None:
     """Draw (colored) text with optional wrapping or ellipsis.
 
     Renders text with support for multiple formatting options:
@@ -181,7 +181,7 @@ async def draw_text(ctx: DrawingContext, element: dict) -> None:
 
 
 @element_handler(ElementType.MULTILINE, requires=["x", "value", "delimiter", "offset_y"])
-async def draw_multiline(ctx: DrawingContext, element: dict) -> None:
+def draw_multiline(ctx: DrawingContext, element: dict) -> None:
     """Draw multiline text with delimiter.
 
     Renders multiple lines of text separated by a delimiter character.

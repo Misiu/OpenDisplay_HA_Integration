@@ -8,7 +8,7 @@ from .types import ElementType, DrawingContext
 
 
 @element_handler(ElementType.DEBUG_GRID)
-async def draw_debug_grid(ctx: DrawingContext, element: dict) -> None:
+def draw_debug_grid(ctx: DrawingContext, element: dict) -> None:
     """
     Draw debug grid for layout assistance.
 

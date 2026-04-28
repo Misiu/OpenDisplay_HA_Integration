@@ -21,7 +21,7 @@ _LOGGER = logging.getLogger(__name__)
 
 
 @element_handler(ElementType.QRCODE, requires=["x", "y", "data"])
-async def draw_qrcode(ctx: DrawingContext, element: dict) -> None:
+def draw_qrcode(ctx: DrawingContext, element: dict) -> None:
     """Draw QR code element.
 
     Generates and renders a QR code with the specified data and properties.
@@ -78,12 +78,15 @@ async def draw_qrcode(ctx: DrawingContext, element: dict) -> None:
 
 
 @element_handler(ElementType.DLIMG, requires=["x", "y", "url", "xsize", "ysize"])
-async def draw_downloaded_image(ctx: DrawingContext, element: dict) -> None:
+def draw_downloaded_image(ctx: DrawingContext, element: dict) -> None:
     """
     Draw downloaded or local image.
 
     Downloads and renders an image from a URL, or loads and renders
     an image from a local path or data URI.
+
+    All network and file I/O runs inside the executor thread that hosts this
+    call, so it never blocks the Home Assistant event loop.
 
     Args:
         ctx: Drawing context
@@ -99,39 +102,36 @@ async def draw_downloaded_image(ctx: DrawingContext, element: dict) -> None:
         rotate = element.get('rotate', 0)
         resize_method = element.get('resize_method', 'stretch')
 
-        # Check if URL is an image entity
-        if element['url'].startswith('image.') or element['url'].startswith('camera.'):
-            # Get state of the image entity
-            state = ctx.hass.states.get(element['url'])
+        url = element['url']
+
+        # Check if URL is an image entity – state access is thread-safe in HA
+        if url.startswith('image.') or url.startswith('camera.'):
+            state = ctx.hass.states.get(url)
             if not state:
                 raise HomeAssistantError(
                     translation_domain=DOMAIN,
                     translation_key="image_entity_not_found",
-                    translation_placeholders={"entity_id": element['url']}
+                    translation_placeholders={"entity_id": url}
                 )
 
-            # Get image URL from entity attributes
             image_url = state.attributes.get("entity_picture")
             if not image_url:
                 raise HomeAssistantError(
                     translation_domain=DOMAIN,
                     translation_key="image_entity_no_url",
-                    translation_placeholders={"entity_id": element['url']}
+                    translation_placeholders={"entity_id": url}
                 )
 
-            # If the URL is relative, make it absolute using HA's base URL
             if image_url.startswith("/"):
                 base_url = get_url(ctx.hass)
                 image_url = f"{base_url}{image_url}"
 
-            # Update URL to the actual image URL
-            element['url'] = image_url
+            url = image_url
 
         # Load image based on URL type
-        if element['url'].startswith(('http://', 'https://')):
-            # Download web image
-            response = await ctx.hass.async_add_executor_job(
-                requests.get, element['url'])
+        if url.startswith(('http://', 'https://')):
+            # Blocking HTTP download – fine because we are in an executor thread
+            response = requests.get(url)
             if response.status_code != 200:
                 raise HomeAssistantError(
                     translation_domain=DOMAIN,
@@ -140,10 +140,10 @@ async def draw_downloaded_image(ctx: DrawingContext, element: dict) -> None:
                 )
             source_img = Image.open(io.BytesIO(response.content))
 
-        elif element['url'].startswith('data:'):
+        elif url.startswith('data:'):
             # Handle data URI
             try:
-                header, encoded = element['url'].split(',', 1)
+                header, encoded = url.split(',', 1)
                 if ';base64' in header:
                     decoded = base64.b64decode(encoded)
                 else:
@@ -157,13 +157,13 @@ async def draw_downloaded_image(ctx: DrawingContext, element: dict) -> None:
                 )
 
         else:
-            # Handle local file
-            if not element['url'].startswith('/'):
+            # Handle local file – blocking read is fine in executor thread
+            if not url.startswith('/'):
                 media_path = ctx.hass.config.path('media')
-                full_path = os.path.join(media_path, element['url'])
+                full_path = os.path.join(media_path, url)
             else:
-                full_path = element['url']
-            source_img = await ctx.hass.async_add_executor_job(Image.open, full_path)
+                full_path = url
+            source_img = Image.open(full_path)
 
         # Process image
         if rotate:
