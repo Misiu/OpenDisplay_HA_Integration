@@ -12,7 +12,7 @@ _LOGGER = logging.getLogger(__name__)
 
 
 @element_handler(ElementType.LINE, requires=["x_start", "x_end"])
-async def draw_line(ctx: DrawingContext, element: dict) -> None:
+def draw_line(ctx: DrawingContext, element: dict) -> None:
     """
     Draw line element.
 
@@ -62,7 +62,7 @@ async def draw_line(ctx: DrawingContext, element: dict) -> None:
 
 
 @element_handler(ElementType.RECTANGLE, requires=["x_start", "x_end", "y_start", "y_end"])
-async def draw_rectangle(ctx: DrawingContext, element: dict) -> None:
+def draw_rectangle(ctx: DrawingContext, element: dict) -> None:
     """
     Draw rectangle element.
 
@@ -103,7 +103,7 @@ async def draw_rectangle(ctx: DrawingContext, element: dict) -> None:
 
 
 @element_handler(ElementType.RECTANGLE_PATTERN, requires=["x_start", "x_size", "y_start", "y_size", "x_repeat", "y_repeat", "x_offset", "y_offset"])
-async def draw_rectangle_pattern(ctx: DrawingContext, element: dict) -> None:
+def draw_rectangle_pattern(ctx: DrawingContext, element: dict) -> None:
     """
     Draw repeated rectangle pattern.
 
@@ -152,7 +152,7 @@ async def draw_rectangle_pattern(ctx: DrawingContext, element: dict) -> None:
 
 
 @element_handler(ElementType.POLYGON, requires=["points"])
-async def draw_polygon(ctx: DrawingContext, element: dict) -> None:
+def draw_polygon(ctx: DrawingContext, element: dict) -> None:
     """Draw a polygon.
 
     Renders a polygon defined by a list of vertex coordinates.
@@ -182,7 +182,7 @@ async def draw_polygon(ctx: DrawingContext, element: dict) -> None:
 
 
 @element_handler(ElementType.CIRCLE, requires=["x", "y", "radius"])
-async def draw_circle(ctx: DrawingContext, element: dict) -> None:
+def draw_circle(ctx: DrawingContext, element: dict) -> None:
     """Draw circle element.
 
     Renders a circle with options for fill and outline.
@@ -214,7 +214,7 @@ async def draw_circle(ctx: DrawingContext, element: dict) -> None:
 
 
 @element_handler(ElementType.ELLIPSE, requires=["x_start", "x_end", "y_start", "y_end"])
-async def draw_ellipse(ctx: DrawingContext, element: dict) -> None:
+def draw_ellipse(ctx: DrawingContext, element: dict) -> None:
     """
     Draw ellipse element.
 
@@ -249,7 +249,7 @@ async def draw_ellipse(ctx: DrawingContext, element: dict) -> None:
 
 
 @element_handler(ElementType.ARC, requires=["x", "y", "radius", "start_angle", "end_angle"])
-async def draw_arc(ctx: DrawingContext, element: dict) -> None:
+def draw_arc(ctx: DrawingContext, element: dict) -> None:
     """Draw an arc or pie slice.
 
     Renders an arc (outline) or pie slice (filled) based on center point,

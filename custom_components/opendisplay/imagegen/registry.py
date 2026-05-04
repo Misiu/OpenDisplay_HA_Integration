@@ -21,14 +21,14 @@ def element_handler(element_type: "ElementType", requires: list[str] | None = No
 
     def decorator(func):
         @wraps(func)
-        async def wrapper(ctx: "DrawingContext", element: dict) -> None:
+        def wrapper(ctx: "DrawingContext", element: dict) -> None:
             if requires:
                 missing = [key for key in requires if key not in element]
                 if missing:
                     raise ValueError(
                         f"{element_type.value} requires: {', '.join(missing)}"
                     )
-            return await func(ctx, element)
+            return func(ctx, element)
 
         _handlers[element_type] = (wrapper, requires or [])
         return wrapper

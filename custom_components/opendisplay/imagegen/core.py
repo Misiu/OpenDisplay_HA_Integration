@@ -303,6 +303,116 @@ class ImageGen:
 
         return element.get("visible", True)
 
+    async def _async_prefetch_resources(self, payload: list) -> None:
+        """Pre-fetch async resources needed by elements in *payload*.
+
+        Only elements that require data from the HA event loop (recorder history)
+        are handled here.  All other I/O (HTTP downloads, local files) is
+        performed directly inside the executor thread during the sync drawing
+        phase.
+
+        Results are stored inside each element dict under a private ``_*`` key
+        so that the synchronous draw handlers can retrieve them without needing
+        access to the event loop.
+        """
+        for element in payload:
+            if not self.should_show_element(element):
+                continue
+
+            element_type_str = element.get("type")
+            if not element_type_str:
+                continue
+
+            try:
+                element_type = ElementType(element_type_str)
+            except ValueError:
+                continue
+
+            if element_type == ElementType.PLOT:
+                from .visualizations import prefetch_plot_data
+                element["_plot_data"] = await prefetch_plot_data(self.hass, element)
+
+    def _generate_sync(
+            self,
+            canvas_width: int,
+            canvas_height: int,
+            service_data: Dict[str, Any],
+            payload: list,
+            error_collector: list,
+            accent_color: str,
+    ) -> bytes:
+        """Synchronous image generation – runs in an executor thread.
+
+        All PIL drawing, QR-code generation, font loading, and JPEG encoding
+        happen here, completely off the Home Assistant event loop.
+
+        Args:
+            canvas_width: Canvas width in pixels
+            canvas_height: Canvas height in pixels
+            service_data: Original service data (for background color, rotate, etc.)
+            payload: List of element dicts (may contain pre-fetched ``_*`` keys)
+            error_collector: List to append per-element error messages to
+            accent_color: Accent color name
+
+        Returns:
+            bytes: JPEG image data
+        """
+        colors = ColorResolver(accent_color)
+
+        rotate = service_data.get("rotate", 0)
+        if rotate in (0, 180):
+            img = Image.new('RGBA', (canvas_width, canvas_height),
+                            color=colors.resolve(service_data.get("background", "white")))
+        else:
+            img = Image.new('RGBA', (canvas_height, canvas_width),
+                            color=colors.resolve(service_data.get("background", "white")))
+
+        ctx = DrawingContext(
+            img=img,
+            colors=colors,
+            coords=CoordinateParser(img.width, img.height),
+            fonts=self._font_manager,
+            hass=self.hass,
+            pos_y=0,
+        )
+
+        for i, element in enumerate(payload):
+            if not self.should_show_element(element):
+                continue
+
+            try:
+                if "type" not in element:
+                    raise ValueError("Element missing required 'type' field")
+                element_type = ElementType(element["type"])
+
+                handler = self._draw_handlers.get(element_type)
+                if handler:
+                    handler(ctx, element)
+                else:
+                    error_msg = f"No handler found for element type: {element_type}"
+                    _LOGGER.warning(error_msg)
+                    error_collector.append(f"Element {i + 1}: {error_msg}")
+
+            except (ValueError, KeyError) as e:
+                error_msg = f"Element {i + 1}: {str(e)}"
+                _LOGGER.error(error_msg)
+                error_collector.append(error_msg)
+                continue
+            except Exception as e:
+                error_msg = f"Element {i + 1} (type '{element.get('type', 'unknown')}'): {str(e)}"
+                _LOGGER.error(error_msg)
+                error_collector.append(error_msg)
+                continue
+
+        if rotate:
+            img = img.rotate(rotate, expand=True)
+
+        rgb_image = img.convert('RGB')
+
+        img_byte_arr = io.BytesIO()
+        rgb_image.save(img_byte_arr, format='JPEG', quality="maximum")
+        return img_byte_arr.getvalue()
+
     async def generate_custom_image(
             self,
             entity_id: str,
@@ -315,8 +425,12 @@ class ImageGen:
     ) -> bytes:
         """Generate a custom image based on service data.
 
-        Main entry point for image generation. Creates an image with the
-        specified elements and returns the JPEG data.
+        Main entry point for image generation. The work is split into two phases:
+
+        1. **Async pre-fetch** (event loop): Collects data that requires the HA
+           event loop, e.g. recorder history for plot elements.
+        2. **Sync generation** (executor thread): All CPU-intensive PIL operations
+           run in a worker thread so the event loop stays responsive.
 
         Args:
             entity_id: The entity ID to generate the image for
@@ -348,67 +462,20 @@ class ImageGen:
 
         _LOGGER.debug("Canvas dimensions for %s: %dx%d", entity_id, canvas_width, canvas_height)
 
-        colors = ColorResolver(accent_color)
-
-        # Get rotation and create base image
-        rotate = service_data.get("rotate", 0)
-        if rotate in (0, 180):
-            img = Image.new('RGBA', (canvas_width, canvas_height),
-                            color=colors.resolve(service_data.get("background", "white")))
-        else:
-            img = Image.new('RGBA', (canvas_height, canvas_width),
-                            color=colors.resolve(service_data.get("background", "white")))
-
         payload = service_data.get("payload", [])
 
-        ctx = DrawingContext(
-            img=img,
-            colors=colors,
-            coords=CoordinateParser(img.width, img.height),
-            fonts=self._font_manager,
-            hass=self.hass,
-            pos_y=0
+        # Phase 1 (event loop): pre-fetch data that needs async access
+        await self._async_prefetch_resources(payload)
+
+        # Phase 2 (executor thread): all CPU-intensive PIL work
+        image_data = await self.hass.async_add_executor_job(
+            self._generate_sync,
+            canvas_width,
+            canvas_height,
+            service_data,
+            payload,
+            error_collector,
+            accent_color,
         )
-
-        for i, element in enumerate(payload):
-            if not self.should_show_element(element):
-                continue
-
-            try:
-                # Get element type
-                if "type" not in element:
-                    raise ValueError("Element missing required 'type' field")
-                element_type = ElementType(element["type"])
-
-                # Get the appropriate handler and call it
-                handler = self._draw_handlers.get(element_type)
-                if handler:
-                    await handler(ctx, element)
-                else:
-                    error_msg = f"No handler found for element type: {element_type}"
-                    _LOGGER.warning(error_msg)
-                    error_collector.append(f"Element {i + 1}: {error_msg}")
-
-            except (ValueError, KeyError) as e:
-                error_msg = f"Element {i + 1}: {str(e)}"
-                _LOGGER.error(error_msg)
-                error_collector.append(error_msg)
-                continue
-            except Exception as e:
-                error_msg = f"Element {i + 1} (type '{element.get('type', 'unknown')}'): {str(e)}"
-                _LOGGER.error(error_msg)
-                error_collector.append(error_msg)
-                continue
-        # Apply rotation if needed
-        if rotate:
-            img = img.rotate(rotate, expand=True)
-
-        # Convert to RGB for JPEG
-        rgb_image = img.convert('RGB')
-
-        # Create BytesIO object for the JPEG data
-        img_byte_arr = io.BytesIO()
-        rgb_image.save(img_byte_arr, format='JPEG', quality="maximum")
-        image_data = img_byte_arr.getvalue()
 
         return image_data

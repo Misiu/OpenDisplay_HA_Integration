@@ -4,8 +4,10 @@ import logging
 import math
 from datetime import timedelta, datetime
 from functools import partial
+from typing import Any
 
 from PIL import ImageDraw
+from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.components.recorder import get_instance
 from homeassistant.components.recorder.history import get_significant_states
@@ -18,20 +20,61 @@ from ..const import DOMAIN
 _LOGGER = logging.getLogger(__name__)
 
 
+async def prefetch_plot_data(hass: HomeAssistant, element: dict) -> dict[str, Any] | None:
+    """Asynchronously fetch the sensor history needed by a *plot* element.
+
+    Must be called on the event loop **before** the synchronous drawing phase
+    runs in an executor thread.
+
+    Returns a dict with keys ``all_states``, ``start``, ``end``, ``duration``,
+    or ``None`` when the element configuration is invalid.
+    """
+    duration_seconds = float(element.get("duration", 60 * 60 * 24))
+    if duration_seconds <= 0:
+        return None
+
+    duration = timedelta(seconds=duration_seconds)
+    end = dt.now()
+    start = end - duration
+
+    entity_ids = [plot["entity"] for plot in element.get("data", [])]
+    if not entity_ids:
+        return None
+
+    all_states = await get_instance(hass).async_add_executor_job(
+        partial(
+            get_significant_states,
+            hass,
+            start_time=start,
+            entity_ids=entity_ids,
+            significant_changes_only=False,
+            minimal_response=True,
+            no_attributes=False,
+        )
+    )
+
+    return {
+        "all_states": all_states,
+        "start": start,
+        "end": end,
+        "duration": duration,
+    }
+
+
 @element_handler(ElementType.PLOT, requires=["data"])
-async def draw_plot(ctx: DrawingContext, element: dict) -> None:
+def draw_plot(ctx: DrawingContext, element: dict) -> None:
     """
     Draw plot of Home Assistant sensor data.
 
     Creates a line plot visualization of historical data from Home Assistant
     entities with customizable axes, legends, and styling.
 
-    This is one of the most complex drawing methods, handling data retrieval,
-    scaling, and rendering of multiple data series and plot components.
+    Sensor history is pre-fetched asynchronously (see :func:`prefetch_plot_data`)
+    and stored in ``element["_plot_data"]`` before this sync handler is called.
 
     Args:
         ctx: Drawing context
-        element: Element dictionary with plot properties
+        element: Element dictionary with plot properties (must contain ``_plot_data``)
     Raises:
         HomeAssistantError: If plot generation fails
     """
@@ -46,16 +89,18 @@ async def draw_plot(ctx: DrawingContext, element: dict) -> None:
         width = x_end - x_start + 1
         height = y_end - y_start + 1
 
-        # Get time range
-        duration_seconds = float(element.get("duration", 60 * 60 * 24))
-        if duration_seconds <= 0:
+        # Use the pre-fetched sensor data
+        plot_data = element.get("_plot_data")
+        if not plot_data:
             raise ServiceValidationError(
                 translation_domain=DOMAIN,
-                translation_key="plot_duration_invalid",
+                translation_key="plot_no_prefetch_data",
             )
-        duration = timedelta(seconds=duration_seconds)
-        end = dt.now()
-        start = end - duration
+
+        all_states = plot_data["all_states"]
+        start = plot_data["start"]
+        end = plot_data["end"]
+        duration = plot_data["duration"]
 
         # Set up font
         font_name = element.get("font", "ppb.ttf")
@@ -63,18 +108,6 @@ async def draw_plot(ctx: DrawingContext, element: dict) -> None:
         # Get min/max values from config
         min_v = element.get("low")
         max_v = element.get("high")
-
-        # Fetch sensor data
-        all_states = await get_instance(ctx.hass).async_add_executor_job(partial(get_significant_states,
-                                                                                  ctx.hass,
-                                                                                  start_time=start,
-                                                                                  entity_ids=[plot["entity"] for
-                                                                                              plot in
-                                                                                              element["data"]],
-                                                                                  significant_changes_only=False,
-                                                                                  minimal_response=True,
-                                                                                  no_attributes=False
-                                                                                  ))
 
         # Process data and find min/max if not specified
         raw_data = []
@@ -744,7 +777,7 @@ async def draw_plot(ctx: DrawingContext, element: dict) -> None:
 
 
 @element_handler(ElementType.PROGRESS_BAR, requires=["x_start", "x_end", "y_start", "y_end", "progress"])
-async def draw_progress_bar(ctx: DrawingContext, element: dict) -> None:
+def draw_progress_bar(ctx: DrawingContext, element: dict) -> None:
     """Draw progress bar with optional percentage text.
 
     Renders a progress bar to visualize a percentage value, with options
@@ -851,7 +884,7 @@ async def draw_progress_bar(ctx: DrawingContext, element: dict) -> None:
 
 
 @element_handler(ElementType.DIAGRAM, requires=["x", "height"])
-async def draw_diagram(ctx: DrawingContext, element: dict) -> None:
+def draw_diagram(ctx: DrawingContext, element: dict) -> None:
     """Draw diagram with optional bars.
 
     Renders a basic diagram with axes and optional bar chart elements.
