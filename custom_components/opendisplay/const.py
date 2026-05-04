@@ -12,7 +12,7 @@ FALLBACK_TAG_DEFINITIONS = {
     0: {"version": 4, "name": "M2 1.54\"", "width": 152, "height": 152},
     1: {"version": 5, "name": "M2 2.9\"", "width": 296, "height": 128},
     2: {"version": 5, "name": "M2 4.2\"", "width": 400, "height": 300},
-    3: {"version": 6, "name": "M2 2.2\"", "width": 212, "height": 104},
+    3: {"version": 7, "name": "M2 2.2\"", "width": 212, "height": 104},
     4: {"version": 4, "name": "M2 2.6\"", "width": 296, "height": 152},
     5: {"version": 4, "name": "M2 7.4\"", "width": 640, "height": 384},
     6: {"version": 4, "name": "Opticon 2.2\"", "width": 250, "height": 128},
