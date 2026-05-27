@@ -19,10 +19,19 @@ from homeassistant.components.bluetooth import (
     async_ble_device_from_address,
     async_discovered_service_info,
 )
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from homeassistant.config_entries import ConfigFlow, ConfigFlowResult, OptionsFlow
 from homeassistant.const import CONF_ADDRESS
+from homeassistant.core import callback
+from homeassistant.helpers import selector
 
-from .const import CONF_ENCRYPTION_KEY, DOMAIN
+from .const import (
+    CONF_DEEP_SLEEP_QUEUE_EXPIRY_HOURS,
+    CONF_ENCRYPTION_KEY,
+    DEFAULT_DEEP_SLEEP_QUEUE_EXPIRY_HOURS,
+    DOMAIN,
+    MAX_DEEP_SLEEP_QUEUE_EXPIRY_HOURS,
+    MIN_DEEP_SLEEP_QUEUE_EXPIRY_HOURS,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -38,6 +47,11 @@ class OpenDisplayConfigFlow(ConfigFlow, domain=DOMAIN):
         self._discovery_info: BluetoothServiceInfoBleak | None = None
         self._discovered_devices: dict[str, BluetoothServiceInfoBleak] = {}
 
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry: Any) -> "OpenDisplayOptionsFlow":
+        """Return the options flow handler."""
+        return OpenDisplayOptionsFlow()
     async def _async_test_connection(
         self, address: str, encryption_key: bytes | None = None
     ) -> None:
@@ -237,4 +251,54 @@ class OpenDisplayConfigFlow(ConfigFlow, domain=DOMAIN):
             ),
             description_placeholders={"name": reauth_entry.title},
             errors=errors,
+        )
+
+
+class OpenDisplayOptionsFlow(OptionsFlow):
+    """Handle OpenDisplay options."""
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Manage options."""
+        if user_input is not None:
+            expiry_hours_raw = user_input.get(
+                CONF_DEEP_SLEEP_QUEUE_EXPIRY_HOURS,
+                DEFAULT_DEEP_SLEEP_QUEUE_EXPIRY_HOURS,
+            )
+            try:
+                expiry_hours = int(expiry_hours_raw)
+            except (TypeError, ValueError):
+                expiry_hours = DEFAULT_DEEP_SLEEP_QUEUE_EXPIRY_HOURS
+            expiry_hours = max(
+                MIN_DEEP_SLEEP_QUEUE_EXPIRY_HOURS,
+                min(expiry_hours, MAX_DEEP_SLEEP_QUEUE_EXPIRY_HOURS),
+            )
+            return self.async_create_entry(
+                data={CONF_DEEP_SLEEP_QUEUE_EXPIRY_HOURS: expiry_hours}
+            )
+
+        current_expiry = self.config_entry.options.get(
+            CONF_DEEP_SLEEP_QUEUE_EXPIRY_HOURS,
+            DEFAULT_DEEP_SLEEP_QUEUE_EXPIRY_HOURS,
+        )
+
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(
+                        CONF_DEEP_SLEEP_QUEUE_EXPIRY_HOURS,
+                        default=current_expiry,
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=MIN_DEEP_SLEEP_QUEUE_EXPIRY_HOURS,
+                            max=MAX_DEEP_SLEEP_QUEUE_EXPIRY_HOURS,
+                            step=1,
+                            unit_of_measurement="h",
+                            mode=selector.NumberSelectorMode.BOX,
+                        )
+                    ),
+                }
+            ),
         )

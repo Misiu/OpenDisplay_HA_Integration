@@ -1,9 +1,11 @@
 """Service registration for the OpenDisplay integration."""
 
+from __future__ import annotations
+
 import asyncio
 from collections.abc import Awaitable, Callable
 import contextlib
-from datetime import timedelta
+from datetime import datetime, timedelta
 from enum import IntEnum
 import io
 import logging
@@ -46,7 +48,15 @@ from homeassistant.helpers.selector import MediaSelector, MediaSelectorConfig
 if TYPE_CHECKING:
     from . import OpenDisplayConfigEntry
 
-from .const import CONF_ENCRYPTION_KEY, DOMAIN, SIGNAL_IMAGE_UPDATED
+from .const import (
+    CONF_DEEP_SLEEP_QUEUE_EXPIRY_HOURS,
+    CONF_ENCRYPTION_KEY,
+    DEFAULT_DEEP_SLEEP_QUEUE_EXPIRY_HOURS,
+    MIN_DEEP_SLEEP_QUEUE_EXPIRY_HOURS,
+    MAX_DEEP_SLEEP_QUEUE_EXPIRY_HOURS,
+    DOMAIN,
+    SIGNAL_IMAGE_UPDATED,
+)
 
 ATTR_IMAGE = "image"
 ATTR_ROTATION = "rotation"
@@ -293,7 +303,10 @@ async def _async_send_image(
     tone: float | str = "auto",
     rotate: Rotation = Rotation.ROTATE_0,
 ) -> None:
-    """Upload a PIL image to the device."""
+    """Upload a PIL image to the device, queuing if the device is sleeping."""
+    address = entry.unique_id
+    assert address is not None
+
     async def _upload(device: OpenDisplayDevice) -> None:
         await device.upload_image(
             img,
@@ -303,6 +316,34 @@ async def _async_send_image(
             fit=fit,
             rotate=rotate,
         )
+
+    if async_ble_device_from_address(hass, address, connectable=True) is None:
+        # Device is not connectable right now – queue the upload for when it wakes.
+        expiry_hours_raw = entry.options.get(
+            CONF_DEEP_SLEEP_QUEUE_EXPIRY_HOURS,
+            DEFAULT_DEEP_SLEEP_QUEUE_EXPIRY_HOURS,
+        )
+        try:
+            expiry_hours = int(expiry_hours_raw)
+        except (TypeError, ValueError):
+            expiry_hours = DEFAULT_DEEP_SLEEP_QUEUE_EXPIRY_HOURS
+        expiry_hours = max(
+            MIN_DEEP_SLEEP_QUEUE_EXPIRY_HOURS,
+            min(expiry_hours, MAX_DEEP_SLEEP_QUEUE_EXPIRY_HOURS),
+        )
+        from .deep_sleep import QueuedDeepSleepUpload
+        entry.runtime_data.deep_sleep_upload = QueuedDeepSleepUpload(
+            action=_upload,
+            jpeg_bytes=b"",
+            queued_at=datetime.now(),
+            expiry=timedelta(hours=expiry_hours),
+        )
+        _LOGGER.info(
+            "Device %s is not connectable; image upload queued for next wake-up",
+            address,
+        )
+        return
+
     await _async_connect_and_run(hass, entry, _upload)
     jpeg = await hass.async_add_executor_job(_pil_to_jpeg, img)
     async_dispatcher_send(hass, f"{SIGNAL_IMAGE_UPDATED}_{entry.unique_id}", jpeg)
