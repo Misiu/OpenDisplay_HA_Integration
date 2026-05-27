@@ -1,5 +1,15 @@
 # Changelog
 
+## [2.0.2](https://github.com/OpenDisplay/Home_Assistant_Integration/compare/2.0.1...2.0.2) (2026-05-12)
+
+
+### Performance Improvements
+
+* keep drawcustom images as PIL until upload ([e72b609](https://github.com/OpenDisplay/Home_Assistant_Integration/commit/e72b609c2d0ffbe925033db5aeaf67863ce3608c))
+* log drawcustom upload timings ([fc034d4](https://github.com/OpenDisplay/Home_Assistant_Integration/commit/fc034d4083513fe7e1c5ff83b49f2902632ba5f1))
+* optimize BLE image preparation ([c6fabd1](https://github.com/OpenDisplay/Home_Assistant_Integration/commit/c6fabd1f619de2fcf0914eec33a87470ed1fb98b))
+* select direct write compression by payload size ([1233130](https://github.com/OpenDisplay/Home_Assistant_Integration/commit/1233130780da1c6439c98a6273b7155709814c1d))
+
 ## [2.0.1](https://github.com/OpenDisplay/Home_Assistant_Integration/compare/2.0.0...2.0.1) (2026-02-25)
 
 

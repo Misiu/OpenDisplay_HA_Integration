@@ -3,6 +3,8 @@ from PIL import Image
 
 from .color_scheme import ColorScheme
 
+QUANTIZE_CHUNK_PIXELS = 262_144
+
 
 def perceptual_color_distance(c1_rgb: tuple[int, int, int], c2_rgb: tuple[int, int, int]) -> float:
     """
@@ -63,6 +65,56 @@ def find_closest_color(pixel_rgb: tuple[int, int, int], palette: list[tuple[int,
 
     return closest, closest_idx
 
+
+def _palette_array(color_scheme: ColorScheme) -> np.ndarray:
+    """Return palette RGB values in display encoding order."""
+    return np.array(list(color_scheme.palette.colors.values()), dtype=np.uint8)
+
+
+def _has_only_palette_colors(image: Image.Image, color_scheme: ColorScheme) -> bool:
+    """Return true when all image pixels are exact colors from the display palette."""
+    rgb_image = image if image.mode == 'RGB' else image.convert('RGB')
+    allowed = set(color_scheme.palette.colors.values())
+    colors = rgb_image.getcolors(maxcolors=len(allowed))
+    return colors is not None and all(rgb in allowed for _, rgb in colors)
+
+
+def _quantize_pixels_to_palette(
+    pixels: np.ndarray,
+    palette: np.ndarray,
+    *,
+    chunk_pixels: int = QUANTIZE_CHUNK_PIXELS,
+) -> np.ndarray:
+    """Map RGB pixels to their closest display palette color in bounded chunks."""
+    flat = pixels.reshape(-1, 3).astype(np.int16, copy=False)
+    palette_i16 = palette.astype(np.int16)
+    target_is_color = (
+        (np.abs(palette_i16[:, 0] - palette_i16[:, 1]) > 20)
+        | (np.abs(palette_i16[:, 2] - palette_i16[:, 1]) > 20)
+    )
+    result = np.empty((flat.shape[0], 3), dtype=np.uint8)
+
+    for start in range(0, flat.shape[0], chunk_pixels):
+        end = min(start + chunk_pixels, flat.shape[0])
+        chunk = flat[start:end]
+        diff = chunk[:, None, :] - palette_i16[None, :, :]
+        dist = (
+            3.0 * (diff[:, :, 0].astype(np.float32) ** 2)
+            + 5.47 * (diff[:, :, 1].astype(np.float32) ** 2)
+            + 1.53 * (diff[:, :, 2].astype(np.float32) ** 2)
+        )
+        source_is_gray = (
+            (np.abs(chunk[:, 0] - chunk[:, 1]) < 20)
+            & (np.abs(chunk[:, 2] - chunk[:, 1]) < 20)
+        )
+        if np.any(source_is_gray) and np.any(target_is_color):
+            dist[np.ix_(source_is_gray, target_is_color)] = np.inf
+
+        result[start:end] = palette[np.argmin(dist, axis=1)]
+
+    return result.reshape(pixels.shape)
+
+
 def apply_direct_mapping(image: Image.Image, color_scheme: ColorScheme) -> Image.Image:
     """
     Apply direct color mapping without dithering.
@@ -77,23 +129,14 @@ def apply_direct_mapping(image: Image.Image, color_scheme: ColorScheme) -> Image
     Returns:
         Quantized PIL Image
     """
-    # Convert to RGB if needed
     if image.mode != 'RGB':
         image = image.convert('RGB')
 
-    # Get palette as list of RGB tuples
-    palette = list(color_scheme.palette.colors.values())
+    if _has_only_palette_colors(image, color_scheme):
+        return image
 
-    pixels = np.array(image)
-    height, width = pixels.shape[:2]
-    result = np.zeros_like(pixels)
-
-    for y in range(height):
-        for x in range(width):
-            pixel = tuple(int(x) for x in pixels[y, x])
-            closest, _ = find_closest_color(pixel, palette)
-            result[y, x] = closest
-
+    pixels = np.asarray(image)
+    result = _quantize_pixels_to_palette(pixels, _palette_array(color_scheme))
     return Image.fromarray(result, 'RGB')
 
 def apply_burkes_dithering(image: Image.Image, color_scheme: ColorScheme) -> Image.Image:
@@ -180,9 +223,6 @@ def apply_ordered_dithering(image: Image.Image, color_scheme: ColorScheme) -> Im
     if image.mode != 'RGB':
         image = image.convert('RGB')
 
-    # Get palette as list of RGB tuples
-    palette = list(color_scheme.palette.colors.values())
-
     # 4x4 Bayer matrix (normalized to 0-1 range)
     bayer_4x4 = np.array([
         [0, 8, 2, 10],
@@ -203,14 +243,8 @@ def apply_ordered_dithering(image: Image.Image, color_scheme: ColorScheme) -> Im
     for c in range(3):
         pixels[:, :, c] += (bayer_tiled - 0.5) * scale
 
-    # Quantize each pixel to nearest palette color
-    result = np.zeros_like(pixels, dtype=np.uint8)
-    for y in range(height):
-        for x in range(width):
-            pixel = tuple(int(c) for c in np.clip(pixels[y, x], 0, 255))
-            closest, _ = find_closest_color(pixel, palette)
-            result[y, x] = closest
-
+    pixels = np.clip(pixels, 0, 255).astype(np.int16)
+    result = _quantize_pixels_to_palette(pixels, _palette_array(color_scheme))
     return Image.fromarray(result, 'RGB')
 
 

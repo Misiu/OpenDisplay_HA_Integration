@@ -13,7 +13,7 @@ class AdvertisingData:
 
     battery_mv: int
     battery_pct: int
-    temperature: int | None
+    temperature: float | None
     hw_type: int
     fw_version: int
     version: int  # Config/protocol version

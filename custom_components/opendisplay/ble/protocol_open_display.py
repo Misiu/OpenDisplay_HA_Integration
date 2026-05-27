@@ -146,9 +146,9 @@ class OpenDisplayProtocol(BLEProtocol):
     def parse_advertising_data(self, data: bytes) -> AdvertisingData:
         """Parse OpenDisplay manufacturer data for device state updates.
 
-        OpenDisplay firmware uses the same advertising format as ATC firmware:
-        [version, hw_type_low, hw_type_high, fw_low, fw_high, reserved_low, reserved_high,
-         battery_low, battery_high, temperature, counter]
+        OpenDisplay firmware has two advertising formats:
+        - Legacy (11 bytes): Same layout as ATC (battery at 7-8, temp at 9)
+        - Current/v1 (14 bytes): Firmware 1.0+ (temp at 11, battery at 12-13)
 
         Args:
             data: Manufacturer-specific advertising data
@@ -166,7 +166,7 @@ class OpenDisplayProtocol(BLEProtocol):
         if len(data) < 5:
             raise ValueError(f"OpenDisplay advertising requires at least 5 bytes, got {len(data)}")
 
-        # Parse core fields (same layout as ATC)
+        # Parse core fields
         version = data[0]
         hw_type = int.from_bytes(data[1:3], "little")
         fw_version = int.from_bytes(data[3:5], "little")
@@ -176,15 +176,27 @@ class OpenDisplayProtocol(BLEProtocol):
         battery_pct = 0
         temperature = None
 
-        # Battery voltage at bytes 7-8 (same as ATC)
-        if len(data) >= 9:
-            battery_mv = int.from_bytes(data[7:9], "little")
-            battery_pct = self._calculate_battery_percentage(battery_mv) if battery_mv > 0 else 0
+        if len(data) >= 14:
+            # Current v1 format (Firmware 1.0+)
+            # Temperature at index 11: 0.5 C resolution, -40 C offset
+            temperature = (data[11] / 2.0) - 40.0
 
-        # Temperature at byte 9 (signed int8, same as ATC)
-        if len(data) >= 10:
-            import struct
-            temperature = struct.unpack("<b", data[9:10])[0]
+            # Battery at index 12 and 13: 10mV resolution, 9-bit value
+            battery_mv = ((data[13] & 0x01) << 8 | data[12]) * 10
+            if battery_mv > 0:
+                battery_pct = self._calculate_battery_percentage(battery_mv)
+        else:
+            # Legacy format: Battery voltage at bytes 7-8 (same as ATC)
+            if len(data) >= 9:
+                battery_mv = int.from_bytes(data[7:9], "little")
+
+                if battery_mv > 0:
+                    battery_pct = self._calculate_battery_percentage(battery_mv)
+
+            # Temperature at byte 9 (signed int8, same as ATC)
+            if len(data) >= 10:
+                import struct
+                temperature = float(struct.unpack("<b", data[9:10])[0])
 
         return AdvertisingData(
             battery_mv=battery_mv,

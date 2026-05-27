@@ -2,8 +2,8 @@
   "config": {
     "step": {
       "bluetooth_confirm": {
-        "title": "Set up BLE Tag",
-        "description": "Set up **{name}**?\n\n**Details:**\n- Address: {address}\n- Signal: {rssi} dBm\n- Battery: {battery}\n- Firmware: {fw_version}\n- Config Version: {config_version}"
+        "title": "Set up OpenDisplay Device",
+        "description": "Set up **{name}**?\n\n**Details:**\n- Device Type: {device_type}\n- Address: {address}\n- Signal: {rssi} dBm{advertised_details}"
       },
       "dhcp_confirm": {
         "title": "Set up {hostname} ({ip})",

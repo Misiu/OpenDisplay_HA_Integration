@@ -39,6 +39,15 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
 )
 
 
+def _format_ble_protocol_label(protocol_type: str) -> str:
+    """Return a user-facing label for a BLE protocol."""
+    if protocol_type == "open_display":
+        return "OpenDisplay (OD)"
+    if protocol_type == "atc":
+        return "OEPL / ATC"
+    return protocol_type
+
+
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for OpenDisplay.
 
@@ -58,6 +67,34 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._discovery_info: BluetoothServiceInfoBleak | None = None
         self._discovered_device: dict[str, Any] | None = {}
         self._dhcp_discovery_info: DhcpServiceInfo | None = None
+
+    def _bluetooth_description_placeholders(
+        self,
+        error: str | None = None,
+    ) -> dict[str, str]:
+        """Build placeholders for the Bluetooth confirmation dialog."""
+        device = self._discovered_device
+        advertised_details = ""
+        if device["protocol_type"] == "atc":
+            battery = f"{device['battery_mv']/1000:.2f}V" if device["battery_mv"] > 0 else "Unknown"
+            fw_version = str(device["fw_version"]) if device["fw_version"] > 0 else "Unknown"
+            config_version = str(device["version"]) if device["version"] > 0 else "Unknown"
+            advertised_details = (
+                f"\n- Battery: {battery}"
+                f"\n- Firmware: {fw_version}"
+                f"\n- Config Version: {config_version}"
+            )
+
+        placeholders = {
+            "name": device["name"],
+            "device_type": device["protocol_display"],
+            "address": device["address"],
+            "rssi": str(device["rssi"]),
+            "advertised_details": advertised_details,
+        }
+        if error is not None:
+            placeholders["error"] = error
+        return placeholders
 
     async def _validate_input(self, host: str) -> tuple[dict[str, str], str | None]:
         """Validate the user input allows us to connect.
@@ -226,6 +263,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             "fw_version": advertising_data.fw_version,
             "version": advertising_data.version,
             "protocol_type": protocol.protocol_name,  # Store protocol type
+            "protocol_display": _format_ble_protocol_label(protocol.protocol_name),
         }
         _LOGGER.debug("Discovered device info: %s", self._discovered_device)
 
@@ -391,14 +429,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return self.async_show_form(
                     step_id="bluetooth_confirm",
                     errors={"base": "invalid_device_config"},
-                    description_placeholders={
-                        "name": self._discovered_device["name"],
-                        "address": self._discovered_device["address"],
-                        "rssi": str(self._discovered_device["rssi"]),
-                        "battery": f"{self._discovered_device['battery_mv']/1000:.2f}V" if self._discovered_device["battery_mv"] > 0 else "Unknown",
-                        "fw_version": str(self._discovered_device["fw_version"]) if self._discovered_device["fw_version"] > 0 else "Unknown",
-                        "config_version": str(self._discovered_device["version"]) if self._discovered_device["version"] > 0 else "Unknown",
-                    },
+                    description_placeholders=self._bluetooth_description_placeholders(),
                 )
 
             except (BLEConnectionError, BLEProtocolError) as e:
@@ -406,15 +437,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return self.async_show_form(
                     step_id="bluetooth_confirm",
                     errors={"base": "interrogation_failed"},
-                    description_placeholders={
-                        "name": self._discovered_device["name"],
-                        "address": self._discovered_device["address"],
-                        "rssi": str(self._discovered_device["rssi"]),
-                        "battery": f"{self._discovered_device['battery_mv']/1000:.2f}V" if self._discovered_device["battery_mv"] > 0 else "Unknown",
-                        "fw_version": str(self._discovered_device["fw_version"]) if self._discovered_device["fw_version"] > 0 else "Unknown",
-                        "config_version": str(self._discovered_device["version"]) if self._discovered_device["version"] > 0 else "Unknown",
-                        "error": str(e),
-                    },
+                    description_placeholders=self._bluetooth_description_placeholders(str(e)),
                 )
 
             except Exception as e:
@@ -422,26 +445,11 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return self.async_show_form(
                     step_id="bluetooth_confirm",
                     errors={"base": "interrogation_failed"},
-                    description_placeholders={
-                        "name": self._discovered_device["name"],
-                        "address": self._discovered_device["address"],
-                        "rssi": str(self._discovered_device["rssi"]),
-                        "battery": f"{self._discovered_device['battery_mv']/1000:.2f}V" if self._discovered_device["battery_mv"] > 0 else "Unknown",
-                        "fw_version": str(self._discovered_device["fw_version"]) if self._discovered_device["fw_version"] > 0 else "Unknown",
-                        "config_version": str(self._discovered_device["version"]) if self._discovered_device["version"] > 0 else "Unknown",
-                        "error": str(e),
-                    },
+                    description_placeholders=self._bluetooth_description_placeholders(str(e)),
                 )
 
         # Build description placeholders from advertising data
-        description_placeholders = {
-            "name": self._discovered_device["name"],
-            "address": self._discovered_device["address"],
-            "rssi": str(self._discovered_device["rssi"]),
-            "battery": f"{self._discovered_device['battery_mv']/1000:.2f}V" if self._discovered_device["battery_mv"] > 0 else "Unknown",
-            "fw_version": str(self._discovered_device["fw_version"]) if self._discovered_device["fw_version"] > 0 else "Unknown",
-            "config_version": str(self._discovered_device["version"]) if self._discovered_device["version"] > 0 else "Unknown",
-        }
+        description_placeholders = self._bluetooth_description_placeholders()
 
         return self.async_show_form(
             step_id="bluetooth_confirm",
