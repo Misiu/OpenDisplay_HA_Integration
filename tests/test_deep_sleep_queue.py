@@ -1,7 +1,7 @@
 """Tests for the per-entry deep-sleep upload queue.
 
 Verifies:
-- QueuedDeepSleepUpload expiry logic
+- DeepSleepUploadQueue expiry logic
 - _async_send_image queues upload when device is not connectable
 - Queued upload is flushed when the coordinator receives an advertisement
   and the device becomes connectable
@@ -14,55 +14,53 @@ from unittest.mock import AsyncMock, MagicMock, patch, call
 
 import pytest
 
-from custom_components.opendisplay.deep_sleep import QueuedDeepSleepUpload
+from custom_components.opendisplay.deep_sleep import DeepSleepUploadQueue
 from custom_components.opendisplay.const import (
-    DEFAULT_DEEP_SLEEP_QUEUE_EXPIRY_HOURS,
-    MIN_DEEP_SLEEP_QUEUE_EXPIRY_HOURS,
-    MAX_DEEP_SLEEP_QUEUE_EXPIRY_HOURS,
+    DEFAULT_DEEP_SLEEP_EXPIRY_SECONDS,
 )
 
 
 # ---------------------------------------------------------------------------
-# QueuedDeepSleepUpload unit tests
+# DeepSleepUploadQueue unit tests
 # ---------------------------------------------------------------------------
 
 
-def _make_queued(*, hours_old: float = 0, expiry_hours: int = DEFAULT_DEEP_SLEEP_QUEUE_EXPIRY_HOURS) -> QueuedDeepSleepUpload:
-    return QueuedDeepSleepUpload(
+def _make_queued(*, seconds_old: float = 0, expiry_seconds: int = DEFAULT_DEEP_SLEEP_EXPIRY_SECONDS) -> DeepSleepUploadQueue:
+    return DeepSleepUploadQueue(
         action=AsyncMock(),
         jpeg_bytes=b"",
-        queued_at=datetime.now() - timedelta(hours=hours_old),
-        expiry=timedelta(hours=expiry_hours),
+        queued_at=datetime.now() - timedelta(seconds=seconds_old),
+        expiry=timedelta(seconds=expiry_seconds),
     )
 
 
 def test_queued_upload_not_expired_when_fresh() -> None:
     """A freshly queued upload is not expired."""
-    q = _make_queued(hours_old=0)
+    q = _make_queued(seconds_old=0)
     assert not q.is_expired
 
 
 def test_queued_upload_not_expired_just_before_expiry() -> None:
     """Upload is not expired just before its expiry window closes."""
-    q = _make_queued(hours_old=DEFAULT_DEEP_SLEEP_QUEUE_EXPIRY_HOURS - 0.01)
+    q = _make_queued(seconds_old=DEFAULT_DEEP_SLEEP_EXPIRY_SECONDS - 1)
     assert not q.is_expired
 
 
 def test_queued_upload_expired_after_default_window() -> None:
-    """Upload is expired after the default 4-hour window."""
-    q = _make_queued(hours_old=DEFAULT_DEEP_SLEEP_QUEUE_EXPIRY_HOURS + 0.01)
+    """Upload is expired after the default expiry window."""
+    q = _make_queued(seconds_old=DEFAULT_DEEP_SLEEP_EXPIRY_SECONDS + 1)
     assert q.is_expired
 
 
 def test_queued_upload_expired_with_custom_expiry() -> None:
     """Upload expiry respects a custom expiry timedelta."""
-    q = _make_queued(hours_old=1.1, expiry_hours=1)
+    q = _make_queued(seconds_old=3700, expiry_seconds=3600)
     assert q.is_expired
 
 
 def test_queued_upload_not_expired_with_custom_expiry() -> None:
     """Upload not expired when within custom expiry window."""
-    q = _make_queued(hours_old=0.9, expiry_hours=1)
+    q = _make_queued(seconds_old=3500, expiry_seconds=3600)
     assert not q.is_expired
 
 
@@ -71,12 +69,13 @@ def test_queued_upload_not_expired_with_custom_expiry() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _make_entry(address: str = "AA:BB:CC:DD:EE:FF", expiry_hours: int = DEFAULT_DEEP_SLEEP_QUEUE_EXPIRY_HOURS) -> MagicMock:
+def _make_entry(address: str = "AA:BB:CC:DD:EE:FF", deep_sleep_time_seconds: int = 3600) -> MagicMock:
     """Build a minimal mock config entry."""
-    runtime_data = SimpleNamespace(deep_sleep_upload=None)
+    power = SimpleNamespace(deep_sleep_time_seconds=deep_sleep_time_seconds)
+    device_config = SimpleNamespace(power=power)
+    runtime_data = SimpleNamespace(deep_sleep_upload=None, device_config=device_config)
     entry = MagicMock()
     entry.unique_id = address
-    entry.options = {}
     entry.runtime_data = runtime_data
     return entry
 
@@ -149,11 +148,11 @@ async def test_send_image_queued_upload_replaces_previous() -> None:
     """A new image upload replaces any previously queued upload."""
     hass = MagicMock()
     entry = _make_entry()
-    first_upload = QueuedDeepSleepUpload(
+    first_upload = DeepSleepUploadQueue(
         action=AsyncMock(),
         jpeg_bytes=b"",
         queued_at=datetime.now(),
-        expiry=timedelta(hours=4),
+        expiry=timedelta(seconds=3600),
     )
     entry.runtime_data.deep_sleep_upload = first_upload
 
@@ -175,16 +174,15 @@ async def test_send_image_queued_upload_replaces_previous() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Deep-sleep expiry configuration clipping
+# Deep-sleep expiry derived from device config
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_expiry_clamped_to_minimum() -> None:
-    """Configured expiry below minimum is clamped to MIN_DEEP_SLEEP_QUEUE_EXPIRY_HOURS."""
+async def test_expiry_derived_from_device_deep_sleep_time() -> None:
+    """Expiry is computed as deep_sleep_time_seconds * 1.1 from device config."""
     hass = MagicMock()
-    entry = _make_entry()
-    entry.options = {"deep_sleep_queue_expiry_hours": 0}  # below minimum
+    entry = _make_entry(deep_sleep_time_seconds=3600)
 
     img = MagicMock()
     from opendisplay import DitherMode, RefreshMode
@@ -200,15 +198,15 @@ async def test_expiry_clamped_to_minimum() -> None:
 
     queued = entry.runtime_data.deep_sleep_upload
     assert queued is not None
-    assert queued.expiry == timedelta(hours=MIN_DEEP_SLEEP_QUEUE_EXPIRY_HOURS)
+    # 3600 * 1.1 = 3960 seconds
+    assert queued.expiry == timedelta(seconds=3960)
 
 
 @pytest.mark.asyncio
-async def test_expiry_clamped_to_maximum() -> None:
-    """Configured expiry above maximum is clamped to MAX_DEEP_SLEEP_QUEUE_EXPIRY_HOURS."""
+async def test_expiry_falls_back_to_default_when_deep_sleep_time_is_zero() -> None:
+    """Fallback expiry is used when device reports deep_sleep_time_seconds = 0."""
     hass = MagicMock()
-    entry = _make_entry()
-    entry.options = {"deep_sleep_queue_expiry_hours": 9999}  # above maximum
+    entry = _make_entry(deep_sleep_time_seconds=0)
 
     img = MagicMock()
     from opendisplay import DitherMode, RefreshMode
@@ -224,4 +222,4 @@ async def test_expiry_clamped_to_maximum() -> None:
 
     queued = entry.runtime_data.deep_sleep_upload
     assert queued is not None
-    assert queued.expiry == timedelta(hours=MAX_DEEP_SLEEP_QUEUE_EXPIRY_HOURS)
+    assert queued.expiry == timedelta(seconds=DEFAULT_DEEP_SLEEP_EXPIRY_SECONDS)

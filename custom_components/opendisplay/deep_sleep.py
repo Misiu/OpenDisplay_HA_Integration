@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 
 
 @dataclass
-class QueuedDeepSleepUpload:
+class DeepSleepUploadQueue:
     """A pending upload waiting for a sleeping device to wake up."""
 
     action: Callable[["OpenDisplayDevice"], Awaitable[None]]

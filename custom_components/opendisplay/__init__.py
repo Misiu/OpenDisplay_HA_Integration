@@ -31,12 +31,10 @@ if TYPE_CHECKING:
 
 from .const import (
     CONF_ENCRYPTION_KEY,
-    CONF_DEEP_SLEEP_QUEUE_EXPIRY_HOURS,
-    DEFAULT_DEEP_SLEEP_QUEUE_EXPIRY_HOURS,
     DOMAIN,
 )
 from .coordinator import OpenDisplayCoordinator
-from .deep_sleep import QueuedDeepSleepUpload
+from .deep_sleep import DeepSleepUploadQueue
 from .services import async_setup_services
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
@@ -54,7 +52,7 @@ class OpenDisplayRuntimeData:
     device_config: GlobalConfig
     is_flex: bool
     upload_task: asyncio.Task | None = None
-    deep_sleep_upload: QueuedDeepSleepUpload | None = None
+    deep_sleep_upload: DeepSleepUploadQueue | None = None
 
 
 type OpenDisplayConfigEntry = ConfigEntry[OpenDisplayRuntimeData]

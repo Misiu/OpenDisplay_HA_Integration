@@ -49,11 +49,8 @@ if TYPE_CHECKING:
     from . import OpenDisplayConfigEntry
 
 from .const import (
-    CONF_DEEP_SLEEP_QUEUE_EXPIRY_HOURS,
     CONF_ENCRYPTION_KEY,
-    DEFAULT_DEEP_SLEEP_QUEUE_EXPIRY_HOURS,
-    MIN_DEEP_SLEEP_QUEUE_EXPIRY_HOURS,
-    MAX_DEEP_SLEEP_QUEUE_EXPIRY_HOURS,
+    DEFAULT_DEEP_SLEEP_EXPIRY_SECONDS,
     DOMAIN,
     SIGNAL_IMAGE_UPDATED,
 )
@@ -319,24 +316,19 @@ async def _async_send_image(
 
     if async_ble_device_from_address(hass, address, connectable=True) is None:
         # Device is not connectable right now – queue the upload for when it wakes.
-        expiry_hours_raw = entry.options.get(
-            CONF_DEEP_SLEEP_QUEUE_EXPIRY_HOURS,
-            DEFAULT_DEEP_SLEEP_QUEUE_EXPIRY_HOURS,
+        # Derive expiry from the device's configured deep-sleep period, plus 10% buffer.
+        deep_sleep_seconds = entry.runtime_data.device_config.power.deep_sleep_time_seconds
+        expiry_seconds = (
+            int(deep_sleep_seconds * 1.1)
+            if deep_sleep_seconds > 0
+            else DEFAULT_DEEP_SLEEP_EXPIRY_SECONDS
         )
-        try:
-            expiry_hours = int(expiry_hours_raw)
-        except (TypeError, ValueError):
-            expiry_hours = DEFAULT_DEEP_SLEEP_QUEUE_EXPIRY_HOURS
-        expiry_hours = max(
-            MIN_DEEP_SLEEP_QUEUE_EXPIRY_HOURS,
-            min(expiry_hours, MAX_DEEP_SLEEP_QUEUE_EXPIRY_HOURS),
-        )
-        from .deep_sleep import QueuedDeepSleepUpload
-        entry.runtime_data.deep_sleep_upload = QueuedDeepSleepUpload(
+        from .deep_sleep import DeepSleepUploadQueue
+        entry.runtime_data.deep_sleep_upload = DeepSleepUploadQueue(
             action=_upload,
             jpeg_bytes=b"",
             queued_at=datetime.now(),
-            expiry=timedelta(hours=expiry_hours),
+            expiry=timedelta(seconds=expiry_seconds),
         )
         _LOGGER.info(
             "Device %s is not connectable; image upload queued for next wake-up",

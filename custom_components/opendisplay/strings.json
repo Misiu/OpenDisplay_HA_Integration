@@ -322,18 +322,5 @@
       },
       "name": "Draw custom image"
     }
-  },
-  "options": {
-    "step": {
-      "init": {
-        "title": "OpenDisplay Options",
-        "data": {
-          "deep_sleep_queue_expiry_hours": "Deep-sleep upload queue expiry (hours)"
-        },
-        "data_description": {
-          "deep_sleep_queue_expiry_hours": "How long to keep a pending image upload queued for a device that is currently in deep sleep. The upload is sent automatically when the device wakes up."
-        }
-      }
-    }
   }
 }
