@@ -17,7 +17,11 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ServiceValidationError, HomeAssistantError
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from .runtime_data import OpenDisplayBLERuntimeData
-from .const import DOMAIN, SIGNAL_TAG_IMAGE_UPDATE
+from .const import (
+    DOMAIN,
+    SIGNAL_TAG_IMAGE_UPDATE,
+    DEFAULT_DEEP_SLEEP_QUEUE_EXPIRY_HOURS,
+)
 from .ble import BLEConnection, BLEImageUploader, BLEDeviceMetadata, get_protocol_by_name, BLEConnectionError, \
     BLETimeoutError, BLEProtocolError
 
@@ -40,6 +44,7 @@ class QueuedDeepSleepUpload:
     args: tuple
     kwargs: dict
     queued_at: datetime
+    expiry: timedelta
 
 
 def image_to_jpeg_bytes(image: Image.Image, quality: int | str = 95) -> bytes:
@@ -235,13 +240,23 @@ class DeepSleepUploadQueue:
     """Store one pending AP upload per sleeping tag with expiration."""
 
     def __init__(self, expiry: timedelta | None = None) -> None:
-        self._expiry = expiry or timedelta(minutes=30)
+        self._default_expiry = expiry or timedelta(
+            hours=DEFAULT_DEEP_SLEEP_QUEUE_EXPIRY_HOURS
+        )
         self._pending_by_tag: dict[str, QueuedDeepSleepUpload] = {}
         self._lock = asyncio.Lock()
 
-    async def queue_upload(self, tag_mac: str, upload_func, *args, **kwargs) -> None:
+    async def queue_upload(
+        self,
+        tag_mac: str,
+        upload_func,
+        *args,
+        expiry: timedelta | None = None,
+        **kwargs,
+    ) -> None:
         """Queue or replace a pending upload for a tag."""
         normalized_mac = tag_mac.upper()
+        effective_expiry = expiry or self._default_expiry
         async with self._lock:
             self._cleanup_expired_locked()
             self._pending_by_tag[normalized_mac] = QueuedDeepSleepUpload(
@@ -249,6 +264,7 @@ class DeepSleepUploadQueue:
                 args=args,
                 kwargs=kwargs,
                 queued_at=datetime.now(),
+                expiry=effective_expiry,
             )
 
     async def pop_upload(self, tag_mac: str) -> QueuedDeepSleepUpload | None:
@@ -260,11 +276,11 @@ class DeepSleepUploadQueue:
 
     def _cleanup_expired_locked(self) -> None:
         """Remove expired queued entries (lock must already be held)."""
-        cutoff = datetime.now() - self._expiry
+        now = datetime.now()
         expired = [
             mac
             for mac, queued_upload in self._pending_by_tag.items()
-            if queued_upload.queued_at < cutoff
+            if (now - queued_upload.queued_at) > queued_upload.expiry
         ]
         for mac in expired:
             self._pending_by_tag.pop(mac, None)
@@ -482,7 +498,7 @@ async def upload_to_ble_block(
 
     except ServiceValidationError:
         raise  # Config/validation errors - propagate unchanged
-    except (BLEConnectionError, BLETimeoutError, BLEProtocolError) as err:
+    except (BLEConnectionError, BLETimeoutError, BLEProtocolError):
         # BLE-specific errors already inherit from HomeAssistantError
         raise  # Propagate with specific type
     except Exception as err:
@@ -592,7 +608,7 @@ async def upload_to_ble_direct(
 
     except ServiceValidationError:
         raise  # Config/validation errors - propagate unchanged
-    except (BLEConnectionError, BLETimeoutError, BLEProtocolError) as err:
+    except (BLEConnectionError, BLETimeoutError, BLEProtocolError):
         raise  # BLE operational errors - propagate unchanged
     except Exception as err:
         raise HomeAssistantError(
@@ -602,9 +618,11 @@ async def upload_to_ble_direct(
         ) from err
 
 
-def create_upload_queues() -> tuple[UploadQueueHandler, UploadQueueHandler, DeepSleepUploadQueue]:
+def create_upload_queues(
+    deep_sleep_expiry: timedelta | None = None,
+) -> tuple[UploadQueueHandler, UploadQueueHandler, DeepSleepUploadQueue]:
     """Create BLE, Hub, and deep-sleep upload queues."""
     ble_queue = UploadQueueHandler(max_concurrent=1, cooldown=0.1)
     hub_queue = UploadQueueHandler(max_concurrent=1, cooldown=1.0)
-    deep_sleep_queue = DeepSleepUploadQueue()
+    deep_sleep_queue = DeepSleepUploadQueue(expiry=deep_sleep_expiry)
     return ble_queue, hub_queue, deep_sleep_queue

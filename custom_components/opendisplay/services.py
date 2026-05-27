@@ -4,6 +4,7 @@ import logging
 from functools import wraps
 from time import perf_counter
 from typing import Final, Any, Callable
+from datetime import timedelta
 
 from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import ServiceValidationError, HomeAssistantError
@@ -11,7 +12,15 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.dispatcher import async_dispatcher_connect, async_dispatcher_send
 from .coordinator import Hub
 from .ble import BLEConnectionError, BLETimeoutError, BLEProtocolError, BLEDeviceMetadata
-from .const import DOMAIN, SIGNAL_TAG_CHECKIN, SIGNAL_TAG_IMAGE_UPDATE
+from .const import (
+    DOMAIN,
+    SIGNAL_TAG_CHECKIN,
+    SIGNAL_TAG_IMAGE_UPDATE,
+    CONF_DEEP_SLEEP_QUEUE_EXPIRY_HOURS,
+    DEFAULT_DEEP_SLEEP_QUEUE_EXPIRY_HOURS,
+    MIN_DEEP_SLEEP_QUEUE_EXPIRY_HOURS,
+    MAX_DEEP_SLEEP_QUEUE_EXPIRY_HOURS,
+)
 from .imagegen import ImageGen
 from .tag_types import get_tag_types_manager
 from .upload import (
@@ -42,7 +51,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
     @callback
     def _handle_tag_checkin(tag_mac: str) -> None:
         """Flush queued deep-sleep uploads when a tag checks in."""
-        hub = get_hub_from_hass(hass)
+        get_hub_from_hass(hass)
 
         async def _flush() -> None:
             queued_upload = await deep_sleep_upload_queue.pop_upload(tag_mac)
@@ -381,10 +390,23 @@ async def async_setup_services(hass: HomeAssistant) -> None:
                 )
                 tag_mac = get_mac_from_entity_id(entity_id)
                 if hub.should_queue_image_upload(tag_mac):
+                    expiry_hours_raw = hub.entry.options.get(
+                        CONF_DEEP_SLEEP_QUEUE_EXPIRY_HOURS,
+                        DEFAULT_DEEP_SLEEP_QUEUE_EXPIRY_HOURS,
+                    )
+                    try:
+                        expiry_hours = int(expiry_hours_raw)
+                    except (TypeError, ValueError):
+                        expiry_hours = DEFAULT_DEEP_SLEEP_QUEUE_EXPIRY_HOURS
+                    expiry_hours = max(
+                        MIN_DEEP_SLEEP_QUEUE_EXPIRY_HOURS,
+                        min(expiry_hours, MAX_DEEP_SLEEP_QUEUE_EXPIRY_HOURS),
+                    )
                     await deep_sleep_upload_queue.queue_upload(
                         tag_mac,
                         upload_to_hub,
                         *upload_args,
+                        expiry=timedelta(hours=expiry_hours),
                     )
                     _LOGGER.info(
                         "Tag %s is sleeping in deep sleep mode, image queued until next check-in",
