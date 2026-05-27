@@ -48,12 +48,7 @@ from homeassistant.helpers.selector import MediaSelector, MediaSelectorConfig
 if TYPE_CHECKING:
     from . import OpenDisplayConfigEntry
 
-from .const import (
-    CONF_ENCRYPTION_KEY,
-    DEFAULT_DEEP_SLEEP_EXPIRY_SECONDS,
-    DOMAIN,
-    SIGNAL_IMAGE_UPDATED,
-)
+from .const import CONF_ENCRYPTION_KEY, DOMAIN, SIGNAL_IMAGE_UPDATED
 
 ATTR_IMAGE = "image"
 ATTR_ROTATION = "rotation"
@@ -314,14 +309,15 @@ async def _async_send_image(
             rotate=rotate,
         )
 
-    if async_ble_device_from_address(hass, address, connectable=True) is None:
-        # Device is not connectable right now – queue the upload for when it wakes.
-        # Derive expiry from the device's configured deep-sleep period, plus 10% buffer.
-        deep_sleep_seconds = entry.runtime_data.device_config.power.deep_sleep_time_seconds
+    deep_sleep_seconds = entry.runtime_data.device_config.power.deep_sleep_time_seconds
+    if (
+        async_ble_device_from_address(hass, address, connectable=True) is None
+        and deep_sleep_seconds > 0
+    ):
+        # Device is sleeping right now – queue the upload for when it wakes.
+        # Expire slightly after the configured deep-sleep interval.
         expiry_seconds = (
             int(deep_sleep_seconds * 1.1)
-            if deep_sleep_seconds > 0
-            else DEFAULT_DEEP_SLEEP_EXPIRY_SECONDS
         )
         if (handle := entry.runtime_data.deep_sleep_expiry_handle) is not None:
             handle.cancel()
