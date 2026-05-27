@@ -34,7 +34,7 @@ from .const import (
     DOMAIN,
 )
 from .coordinator import OpenDisplayCoordinator
-from .deep_sleep import DeepSleepUploadQueue
+from .deep_sleep import DeepSleepQueuedUpload
 from .services import async_setup_services
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
@@ -52,7 +52,8 @@ class OpenDisplayRuntimeData:
     device_config: GlobalConfig
     is_flex: bool
     upload_task: asyncio.Task | None = None
-    deep_sleep_upload: DeepSleepUploadQueue | None = None
+    deep_sleep_upload: DeepSleepQueuedUpload | None = None
+    deep_sleep_expiry_handle: asyncio.TimerHandle | None = None
 
 
 type OpenDisplayConfigEntry = ConfigEntry[OpenDisplayRuntimeData]
@@ -166,11 +167,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenDisplayConfigEntry) 
             return
         if queued.is_expired:
             entry.runtime_data.deep_sleep_upload = None
+            if (handle := entry.runtime_data.deep_sleep_expiry_handle) is not None:
+                handle.cancel()
+                entry.runtime_data.deep_sleep_expiry_handle = None
             return
         if async_ble_device_from_address(hass, address, connectable=True) is None:
             return
         # Device is now connectable – flush the queued upload
         entry.runtime_data.deep_sleep_upload = None
+        if (handle := entry.runtime_data.deep_sleep_expiry_handle) is not None:
+            handle.cancel()
+            entry.runtime_data.deep_sleep_expiry_handle = None
         from .services import _async_connect_and_run  # noqa: PLC0415 – avoid circular import at module level
         hass.async_create_task(
             _async_connect_and_run(hass, entry, queued.action),
@@ -194,6 +201,10 @@ async def async_unload_entry(
     hass: HomeAssistant, entry: OpenDisplayConfigEntry
 ) -> bool:
     """Unload a config entry."""
+    if (handle := entry.runtime_data.deep_sleep_expiry_handle) is not None:
+        handle.cancel()
+        entry.runtime_data.deep_sleep_expiry_handle = None
+
     if (task := entry.runtime_data.upload_task) and not task.done():
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):

@@ -1,7 +1,7 @@
 """Tests for the per-entry deep-sleep upload queue.
 
 Verifies:
-- DeepSleepUploadQueue expiry logic
+- DeepSleepQueuedUpload expiry logic
 - _async_send_image queues upload when device is not connectable
 - Queued upload is flushed when the coordinator receives an advertisement
   and the device becomes connectable
@@ -14,19 +14,19 @@ from unittest.mock import AsyncMock, MagicMock, patch, call
 
 import pytest
 
-from custom_components.opendisplay.deep_sleep import DeepSleepUploadQueue
+from custom_components.opendisplay.deep_sleep import DeepSleepQueuedUpload
 from custom_components.opendisplay.const import (
     DEFAULT_DEEP_SLEEP_EXPIRY_SECONDS,
 )
 
 
 # ---------------------------------------------------------------------------
-# DeepSleepUploadQueue unit tests
+# DeepSleepQueuedUpload unit tests
 # ---------------------------------------------------------------------------
 
 
-def _make_queued(*, seconds_old: float = 0, expiry_seconds: int = DEFAULT_DEEP_SLEEP_EXPIRY_SECONDS) -> DeepSleepUploadQueue:
-    return DeepSleepUploadQueue(
+def _make_queued(*, seconds_old: float = 0, expiry_seconds: int = DEFAULT_DEEP_SLEEP_EXPIRY_SECONDS) -> DeepSleepQueuedUpload:
+    return DeepSleepQueuedUpload(
         action=AsyncMock(),
         jpeg_bytes=b"",
         queued_at=datetime.now() - timedelta(seconds=seconds_old),
@@ -73,7 +73,11 @@ def _make_entry(address: str = "AA:BB:CC:DD:EE:FF", deep_sleep_time_seconds: int
     """Build a minimal mock config entry."""
     power = SimpleNamespace(deep_sleep_time_seconds=deep_sleep_time_seconds)
     device_config = SimpleNamespace(power=power)
-    runtime_data = SimpleNamespace(deep_sleep_upload=None, device_config=device_config)
+    runtime_data = SimpleNamespace(
+        deep_sleep_upload=None,
+        deep_sleep_expiry_handle=None,
+        device_config=device_config,
+    )
     entry = MagicMock()
     entry.unique_id = address
     entry.runtime_data = runtime_data
@@ -148,7 +152,7 @@ async def test_send_image_queued_upload_replaces_previous() -> None:
     """A new image upload replaces any previously queued upload."""
     hass = MagicMock()
     entry = _make_entry()
-    first_upload = DeepSleepUploadQueue(
+    first_upload = DeepSleepQueuedUpload(
         action=AsyncMock(),
         jpeg_bytes=b"",
         queued_at=datetime.now(),
@@ -223,3 +227,40 @@ async def test_expiry_falls_back_to_default_when_deep_sleep_time_is_zero() -> No
     queued = entry.runtime_data.deep_sleep_upload
     assert queued is not None
     assert queued.expiry == timedelta(seconds=DEFAULT_DEEP_SLEEP_EXPIRY_SECONDS)
+
+
+@pytest.mark.asyncio
+async def test_expiry_callback_purges_queued_upload_without_advertisement() -> None:
+    """Queued upload is proactively removed when expiry timer callback runs."""
+    hass = MagicMock()
+    entry = _make_entry(deep_sleep_time_seconds=10)
+    img = MagicMock()
+
+    from opendisplay import DitherMode, RefreshMode
+    from custom_components.opendisplay.services import _async_send_image
+
+    fake_handle = MagicMock()
+    callback_holder: dict[str, object] = {}
+
+    def _capture_call_later(_seconds: int, callback):
+        callback_holder["cb"] = callback
+        return fake_handle
+
+    hass.loop = MagicMock()
+    hass.loop.call_later = MagicMock(side_effect=_capture_call_later)
+
+    with patch(
+        "custom_components.opendisplay.services.async_ble_device_from_address",
+        return_value=None,
+    ):
+        await _async_send_image(
+            hass, entry, img, dither_mode=DitherMode.BURKES, refresh_mode=RefreshMode.FULL
+        )
+
+    assert entry.runtime_data.deep_sleep_upload is not None
+    assert entry.runtime_data.deep_sleep_expiry_handle is fake_handle
+
+    callback_holder["cb"]()
+
+    assert entry.runtime_data.deep_sleep_upload is None
+    assert entry.runtime_data.deep_sleep_expiry_handle is None

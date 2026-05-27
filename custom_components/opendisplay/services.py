@@ -323,12 +323,32 @@ async def _async_send_image(
             if deep_sleep_seconds > 0
             else DEFAULT_DEEP_SLEEP_EXPIRY_SECONDS
         )
-        from .deep_sleep import DeepSleepUploadQueue
-        entry.runtime_data.deep_sleep_upload = DeepSleepUploadQueue(
+        if (handle := entry.runtime_data.deep_sleep_expiry_handle) is not None:
+            handle.cancel()
+            entry.runtime_data.deep_sleep_expiry_handle = None
+
+        from .deep_sleep import DeepSleepQueuedUpload
+        queued_upload = DeepSleepQueuedUpload(
             action=_upload,
             jpeg_bytes=b"",
             queued_at=datetime.now(),
             expiry=timedelta(seconds=expiry_seconds),
+        )
+        entry.runtime_data.deep_sleep_upload = queued_upload
+
+        def _purge_if_expired() -> None:
+            """Drop queued upload if it still exists when the expiry window closes."""
+            current_queued = entry.runtime_data.deep_sleep_upload
+            if current_queued is queued_upload:
+                entry.runtime_data.deep_sleep_upload = None
+                _LOGGER.info(
+                    "Dropped queued image upload for %s after expiry timeout",
+                    address,
+                )
+            entry.runtime_data.deep_sleep_expiry_handle = None
+
+        entry.runtime_data.deep_sleep_expiry_handle = hass.loop.call_later(
+            expiry_seconds, _purge_if_expired
         )
         _LOGGER.info(
             "Device %s is not connectable; image upload queued for next wake-up",
