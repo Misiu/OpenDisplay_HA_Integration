@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from io import BytesIO
 from time import perf_counter
-from typing import Final
+from typing import Final, Callable, Awaitable, Any
 
 import async_timeout
 import requests
@@ -29,6 +30,16 @@ DITHER_DEFAULT = DITHER_ORDERED
 
 MAX_RETRIES = 3
 INITIAL_BACKOFF = 2  # seconds
+
+
+@dataclass
+class QueuedDeepSleepUpload:
+    """Stores a pending deep-sleep upload for a single tag."""
+
+    upload_func: Callable[..., Awaitable[Any]]
+    args: tuple
+    kwargs: dict
+    queued_at: datetime
 
 
 def image_to_jpeg_bytes(image: Image.Image, quality: int | str = 95) -> bytes:
@@ -218,6 +229,45 @@ class UploadQueueHandler:
             # Mark task as done
             self._queue.task_done()
             _LOGGER.debug("Upload task for %s finished. %s", entity_id, self)
+
+
+class DeepSleepUploadQueue:
+    """Store one pending AP upload per sleeping tag with expiration."""
+
+    def __init__(self, expiry: timedelta | None = None) -> None:
+        self._expiry = expiry or timedelta(minutes=30)
+        self._pending_by_tag: dict[str, QueuedDeepSleepUpload] = {}
+        self._lock = asyncio.Lock()
+
+    async def queue_upload(self, tag_mac: str, upload_func, *args, **kwargs) -> None:
+        """Queue or replace a pending upload for a tag."""
+        normalized_mac = tag_mac.upper()
+        async with self._lock:
+            self._cleanup_expired_locked()
+            self._pending_by_tag[normalized_mac] = QueuedDeepSleepUpload(
+                upload_func=upload_func,
+                args=args,
+                kwargs=kwargs,
+                queued_at=datetime.now(),
+            )
+
+    async def pop_upload(self, tag_mac: str) -> QueuedDeepSleepUpload | None:
+        """Return and remove pending upload for tag if it is not expired."""
+        normalized_mac = tag_mac.upper()
+        async with self._lock:
+            self._cleanup_expired_locked()
+            return self._pending_by_tag.pop(normalized_mac, None)
+
+    def _cleanup_expired_locked(self) -> None:
+        """Remove expired queued entries (lock must already be held)."""
+        cutoff = datetime.now() - self._expiry
+        expired = [
+            mac
+            for mac, queued_upload in self._pending_by_tag.items()
+            if queued_upload.queued_at < cutoff
+        ]
+        for mac in expired:
+            self._pending_by_tag.pop(mac, None)
 
 
 async def upload_to_hub(hub, entity_id: str, img: Image.Image, dither: int, ttl: int,
@@ -552,8 +602,9 @@ async def upload_to_ble_direct(
         ) from err
 
 
-def create_upload_queues() -> tuple[UploadQueueHandler, UploadQueueHandler]:
-    """Create BLE and Hub upload queues with appropriate settings."""
+def create_upload_queues() -> tuple[UploadQueueHandler, UploadQueueHandler, DeepSleepUploadQueue]:
+    """Create BLE, Hub, and deep-sleep upload queues."""
     ble_queue = UploadQueueHandler(max_concurrent=1, cooldown=0.1)
     hub_queue = UploadQueueHandler(max_concurrent=1, cooldown=1.0)
-    return ble_queue, hub_queue
+    deep_sleep_queue = DeepSleepUploadQueue()
+    return ble_queue, hub_queue, deep_sleep_queue
