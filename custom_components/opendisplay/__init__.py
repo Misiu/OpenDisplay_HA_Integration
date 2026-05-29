@@ -143,7 +143,11 @@ def _log_config_changes(
     """Log config changes detected between cached and live device config."""
     previous = _serialize_device_config(previous_config)
     latest = _serialize_device_config(latest_config)
-    if not isinstance(previous, dict) or not isinstance(latest, dict) or previous == latest:
+    if (
+        not isinstance(previous, dict)
+        or not isinstance(latest, dict)
+        or previous == latest
+    ):
         return
 
     changed_keys = sorted(
@@ -321,7 +325,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenDisplayConfigEntry) 
                     assert latest_config is not None
                 latest_is_flex = device.is_flex
         except (AuthenticationFailedError, AuthenticationRequiredError) as err:
-            _LOGGER.debug("%s: Skipping runtime config sync due to auth error: %s", address, err)
+            _LOGGER.debug(
+                "%s: Skipping runtime config sync due to auth error: %s",
+                address,
+                err,
+            )
             return
         except (BLEConnectionError, BLETimeoutError, OpenDisplayError) as err:
             _LOGGER.debug("%s: Runtime config sync skipped: %s", address, err)
