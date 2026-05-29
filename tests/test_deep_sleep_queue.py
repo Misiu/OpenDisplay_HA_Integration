@@ -204,7 +204,9 @@ async def test_send_image_uploads_immediately_when_connectable() -> None:
 
 
 @pytest.mark.asyncio
-async def test_send_image_queues_when_connection_times_out() -> None:
+async def test_send_image_queues_when_connection_times_out(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Image upload is queued when connection fails but deep sleep is enabled."""
     hass = MagicMock()
     entry = _make_entry(deep_sleep_time_seconds=3600)
