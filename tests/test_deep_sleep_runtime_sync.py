@@ -336,3 +336,78 @@ async def test_queued_upload_is_cleared_when_wake_flush_succeeds() -> None:
     assert entry.runtime_data.deep_sleep_expiry_handle is None
     assert entry.runtime_data.deep_sleep_flush_task is None
     expiry_handle.cancel.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_queued_upload_kept_when_ble_cache_expires_between_precheck_and_flush(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Race condition: BLE connectable cache expires between the coordinator
+    pre-check (device appears connectable) and the actual connect attempt inside
+    _async_connect_and_run (device is gone from cache).
+
+    The queue must be kept for the next wake-up cycle, not dropped.
+    """
+    hass = _make_hass()
+    entry = _make_entry()
+    coordinator = _FakeCoordinator()
+    initial_config = _make_device_config(300)
+
+    class _FakeDevice:
+        def __init__(self, **kwargs) -> None:
+            self.is_flex = False
+            self.config = initial_config
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def read_firmware_version(self):
+            return {"major": 1, "minor": 0}
+
+    queued_action = AsyncMock()
+    queued_upload = DeepSleepQueuedUpload(
+        action=queued_action,
+        jpeg_bytes=b"",
+        queued_at=datetime.now() - timedelta(seconds=20),
+        expiry=timedelta(seconds=330),
+    )
+    expiry_handle = MagicMock()
+
+    with (
+        patch("custom_components.opendisplay._cached_runtime_data", return_value=None),
+        patch(
+            "custom_components.opendisplay.OpenDisplayCoordinator",
+            return_value=coordinator,
+        ),
+        patch("custom_components.opendisplay.dr.async_get", return_value=MagicMock()),
+        patch("custom_components.opendisplay.OpenDisplayDevice", _FakeDevice),
+        # __init__.py pre-check sees the device as connectable
+        patch(
+            "custom_components.opendisplay.async_ble_device_from_address",
+            return_value=MagicMock(),
+        ),
+        patch("custom_components.opendisplay._cache_runtime_data"),
+        # services.py connect attempt finds the cache entry gone (race condition)
+        patch(
+            "custom_components.opendisplay.services.async_ble_device_from_address",
+            return_value=None,
+        ),
+        caplog.at_level(logging.INFO),
+    ):
+        assert await async_setup_entry(hass, entry) is True
+        entry.runtime_data.deep_sleep_upload = queued_upload
+        entry.runtime_data.deep_sleep_expiry_handle = expiry_handle
+
+        coordinator.available = True
+        coordinator.listener()
+        await asyncio.gather(*hass._test_tasks)
+
+    # Queue must be preserved so the next wake-up can retry the upload
+    assert entry.runtime_data.deep_sleep_upload is queued_upload
+    assert entry.runtime_data.deep_sleep_expiry_handle is expiry_handle
+    assert entry.runtime_data.deep_sleep_flush_task is None
+    expiry_handle.cancel.assert_not_called()
+    assert "Queued image upload deferred again; keeping queue" in caplog.text

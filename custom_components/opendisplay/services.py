@@ -263,6 +263,12 @@ async def _async_connect_and_run(
     assert address is not None
     ble_device = async_ble_device_from_address(hass, address, connectable=True)
     if ble_device is None:
+        if not wrap_connection_errors:
+            # Treat a missing BLE cache entry as a retryable connection failure so
+            # callers like the deep-sleep flush keep the queued upload instead of
+            # dropping it when the connectable cache expires between the pre-check
+            # and the actual connect attempt.
+            raise BLEConnectionError(f"OpenDisplay device {address} not connectable")
         raise HomeAssistantError(
             translation_domain=DOMAIN,
             translation_key="device_not_found",

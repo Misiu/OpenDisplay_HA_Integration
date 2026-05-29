@@ -401,3 +401,56 @@ async def test_expiry_callback_purges_queued_upload_without_advertisement() -> N
 
     assert entry.runtime_data.deep_sleep_upload is None
     assert entry.runtime_data.deep_sleep_expiry_handle is None
+
+
+# ---------------------------------------------------------------------------
+# _async_connect_and_run — device-not-found error wrapping
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_connect_and_run_raises_ble_error_when_no_device_wrap_false() -> None:
+    """_async_connect_and_run raises BLEConnectionError (retryable) when the BLE
+    connectable cache has no entry and wrap_connection_errors=False.
+
+    This ensures deep-sleep flush callers keep the queued upload for retry
+    instead of permanently dropping it.
+    """
+    from opendisplay import BLEConnectionError as _BLEConnectionError
+    from custom_components.opendisplay.services import _async_connect_and_run
+
+    hass = MagicMock()
+    entry = MagicMock()
+    entry.unique_id = "AA:BB:CC:DD:EE:FF"
+
+    with (
+        patch(
+            "custom_components.opendisplay.services.async_ble_device_from_address",
+            return_value=None,
+        ),
+        pytest.raises(_BLEConnectionError),
+    ):
+        await _async_connect_and_run(hass, entry, AsyncMock(), wrap_connection_errors=False)
+
+
+@pytest.mark.asyncio
+async def test_connect_and_run_raises_home_assistant_error_when_no_device_wrap_true() -> None:
+    """_async_connect_and_run raises HomeAssistantError (user-visible) when the BLE
+    connectable cache has no entry and wrap_connection_errors=True (the default).
+    """
+    from homeassistant.exceptions import HomeAssistantError
+    from custom_components.opendisplay.services import _async_connect_and_run
+
+    hass = MagicMock()
+    entry = MagicMock()
+    entry.unique_id = "AA:BB:CC:DD:EE:FF"
+    entry.data = {}
+
+    with (
+        patch(
+            "custom_components.opendisplay.services.async_ble_device_from_address",
+            return_value=None,
+        ),
+        pytest.raises(HomeAssistantError),
+    ):
+        await _async_connect_and_run(hass, entry, AsyncMock(), wrap_connection_errors=True)
