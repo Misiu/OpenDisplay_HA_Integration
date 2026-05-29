@@ -165,7 +165,9 @@ async def test_send_image_queue_log_includes_sleep_and_ttl(caplog: pytest.LogCap
 
 
 @pytest.mark.asyncio
-async def test_send_image_uploads_immediately_when_connectable() -> None:
+async def test_send_image_uploads_immediately_when_connectable(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Image upload proceeds immediately when the BLE device is connectable."""
     hass = MagicMock()
     entry = _make_entry()
@@ -178,21 +180,18 @@ async def test_send_image_uploads_immediately_when_connectable() -> None:
     ble_device = MagicMock()
     hass.async_add_executor_job = AsyncMock(return_value=b"jpeg")
 
-    with (
-        patch(
-            "custom_components.opendisplay.services.async_ble_device_from_address",
-            return_value=ble_device,
-        ),
-        patch(
-            "custom_components.opendisplay.services._async_connect_and_run",
-            new_callable=AsyncMock,
-        ) as mock_run,
-        patch(
-            "custom_components.opendisplay.services._pil_to_jpeg",
-            return_value=b"jpeg",
-        ),
-        patch("custom_components.opendisplay.services.async_dispatcher_send"),
-    ):
+    with patch(
+        "custom_components.opendisplay.services.async_ble_device_from_address",
+        return_value=ble_device,
+    ), patch(
+        "custom_components.opendisplay.services._async_connect_and_run",
+        new_callable=AsyncMock,
+    ) as mock_run, patch(
+        "custom_components.opendisplay.services._pil_to_jpeg",
+        return_value=b"jpeg",
+    ), patch(
+        "custom_components.opendisplay.services.async_dispatcher_send"
+    ), caplog.at_level(logging.INFO):
         await _async_send_image(
             hass, entry, img, dither_mode=DitherMode.BURKES, refresh_mode=RefreshMode.FULL
         )
@@ -201,6 +200,11 @@ async def test_send_image_uploads_immediately_when_connectable() -> None:
     assert entry.runtime_data.deep_sleep_upload is None
     # _async_connect_and_run should have been called
     mock_run.assert_awaited_once()
+    assert (
+        "Uploading image to AA:BB:CC:DD:EE:FF immediately (device connectable, deep sleep=3600s)"
+        in caplog.text
+    )
+    assert "AA:BB:CC:DD:EE:FF: Upload completed and image cache updated" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -249,15 +253,20 @@ async def test_send_image_queues_when_connection_times_out(
 
 
 @pytest.mark.asyncio
-async def test_send_image_queued_upload_replaces_previous() -> None:
+async def test_send_image_queued_upload_replaces_previous(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """A new image upload replaces any previously queued upload."""
     hass = MagicMock()
-    entry = _make_entry()
+    entry = _make_entry(deep_sleep_time_seconds=300)
+    old_handle = MagicMock()
+    new_handle = MagicMock()
+    entry.runtime_data.deep_sleep_expiry_handle = old_handle
     first_upload = DeepSleepQueuedUpload(
         action=AsyncMock(),
         jpeg_bytes=b"",
-        queued_at=datetime.now(),
-        expiry=timedelta(seconds=3600),
+        queued_at=datetime.now() - timedelta(seconds=240),
+        expiry=timedelta(seconds=300),
     )
     entry.runtime_data.deep_sleep_upload = first_upload
 
@@ -265,10 +274,13 @@ async def test_send_image_queued_upload_replaces_previous() -> None:
     from opendisplay import DitherMode, RefreshMode
     from custom_components.opendisplay.services import _async_send_image
 
+    hass.loop = MagicMock()
+    hass.loop.call_later = MagicMock(return_value=new_handle)
+
     with patch(
         "custom_components.opendisplay.services.async_ble_device_from_address",
         return_value=None,
-    ):
+    ), caplog.at_level(logging.INFO):
         await _async_send_image(
             hass, entry, img, dither_mode=DitherMode.BURKES, refresh_mode=RefreshMode.FULL
         )
@@ -276,6 +288,14 @@ async def test_send_image_queued_upload_replaces_previous() -> None:
     new_upload = entry.runtime_data.deep_sleep_upload
     assert new_upload is not None
     assert new_upload is not first_upload
+    assert new_upload.expiry == timedelta(seconds=330)
+    assert entry.runtime_data.deep_sleep_expiry_handle is new_handle
+    old_handle.cancel.assert_called_once()
+    assert (
+        "Replacing queued image upload for AA:BB:CC:DD:EE:FF; previous ttl_left="
+        in caplog.text
+    )
+    assert "reset ttl=330s" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -308,7 +328,9 @@ async def test_expiry_derived_from_device_deep_sleep_time() -> None:
 
 
 @pytest.mark.asyncio
-async def test_send_image_uploads_immediately_when_deep_sleep_is_unsupported() -> None:
+async def test_send_image_uploads_immediately_when_deep_sleep_is_unsupported(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Image upload is not queued when deep sleep is not configured."""
     hass = MagicMock()
     entry = _make_entry(deep_sleep_time_seconds=0)
@@ -319,27 +341,29 @@ async def test_send_image_uploads_immediately_when_deep_sleep_is_unsupported() -
 
     hass.async_add_executor_job = AsyncMock(return_value=b"jpeg")
 
-    with (
-        patch(
-            "custom_components.opendisplay.services.async_ble_device_from_address",
-            return_value=None,
-        ),
-        patch(
-            "custom_components.opendisplay.services._async_connect_and_run",
-            new_callable=AsyncMock,
-        ) as mock_run,
-        patch(
-            "custom_components.opendisplay.services._pil_to_jpeg",
-            return_value=b"jpeg",
-        ),
-        patch("custom_components.opendisplay.services.async_dispatcher_send"),
-    ):
+    with patch(
+        "custom_components.opendisplay.services.async_ble_device_from_address",
+        return_value=None,
+    ), patch(
+        "custom_components.opendisplay.services._async_connect_and_run",
+        new_callable=AsyncMock,
+    ) as mock_run, patch(
+        "custom_components.opendisplay.services._pil_to_jpeg",
+        return_value=b"jpeg",
+    ), patch(
+        "custom_components.opendisplay.services.async_dispatcher_send"
+    ), caplog.at_level(logging.INFO):
         await _async_send_image(
             hass, entry, img, dither_mode=DitherMode.BURKES, refresh_mode=RefreshMode.FULL
         )
 
     assert entry.runtime_data.deep_sleep_upload is None
     mock_run.assert_awaited_once()
+    assert (
+        "Uploading image to AA:BB:CC:DD:EE:FF immediately "
+        "(deep sleep unsupported/disabled, connectable=False)" in caplog.text
+    )
+    assert "AA:BB:CC:DD:EE:FF: Upload completed and image cache updated" in caplog.text
 
 
 @pytest.mark.asyncio

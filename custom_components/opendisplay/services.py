@@ -331,6 +331,9 @@ async def _async_send_image(
     deep_sleep_supported = supports_deep_sleep(device_config)
     sleep_seconds = deep_sleep_seconds(device_config)
     deep_sleep_active = deep_sleep_supported and deep_sleep_enabled(device_config)
+    is_connectable_now = (
+        async_ble_device_from_address(hass, address, connectable=True) is not None
+    )
 
     async def _upload(device: OpenDisplayDevice) -> None:
         await device.upload_image(
@@ -345,6 +348,8 @@ async def _async_send_image(
     def _queue_for_deep_sleep(*, reason: str, error: Exception | None = None) -> None:
         """Queue upload until the sleeping device becomes connectable again."""
         expiry_seconds = int(sleep_seconds * 1.1)
+        now = datetime.now()
+        previous_upload = entry.runtime_data.deep_sleep_upload
         if (handle := entry.runtime_data.deep_sleep_expiry_handle) is not None:
             handle.cancel()
             entry.runtime_data.deep_sleep_expiry_handle = None
@@ -354,10 +359,19 @@ async def _async_send_image(
         queued_upload = DeepSleepQueuedUpload(
             action=_upload,
             jpeg_bytes=b"",
-            queued_at=datetime.now(),
+            queued_at=now,
             expiry=timedelta(seconds=expiry_seconds),
         )
         entry.runtime_data.deep_sleep_upload = queued_upload
+        if previous_upload is not None:
+            age = now - previous_upload.queued_at
+            ttl_left = max(0, int((previous_upload.expiry - age).total_seconds()))
+            _LOGGER.info(
+                "Replacing queued image upload for %s; previous ttl_left=%ss, reset ttl=%ss",
+                address,
+                ttl_left,
+                expiry_seconds,
+            )
 
         def _purge_if_expired() -> None:
             """Drop queued upload if it still exists when the expiry window closes."""
@@ -385,13 +399,22 @@ async def _async_send_image(
         if error is not None:
             _LOGGER.debug("Queue trigger details for %s: %s", address, error)
 
-    if (
-        async_ble_device_from_address(hass, address, connectable=True) is None
-        and deep_sleep_active
-    ):
+    if not is_connectable_now and deep_sleep_active:
         # Device is sleeping right now – queue the upload for when it wakes.
         _queue_for_deep_sleep(reason="device not connectable")
         return
+    if deep_sleep_active and is_connectable_now:
+        _LOGGER.info(
+            "Uploading image to %s immediately (device connectable, deep sleep=%ss)",
+            address,
+            sleep_seconds,
+        )
+    elif not deep_sleep_active:
+        _LOGGER.info(
+            "Uploading image to %s immediately (deep sleep unsupported/disabled, connectable=%s)",
+            address,
+            is_connectable_now,
+        )
 
     try:
         await _async_connect_and_run(
@@ -409,6 +432,7 @@ async def _async_send_image(
 
     jpeg = await hass.async_add_executor_job(_pil_to_jpeg, img)
     async_dispatcher_send(hass, f"{SIGNAL_IMAGE_UPDATED}_{entry.unique_id}", jpeg)
+    _LOGGER.info("%s: Upload completed and image cache updated", address)
 
 
 async def _async_upload_image(call: ServiceCall) -> None:
