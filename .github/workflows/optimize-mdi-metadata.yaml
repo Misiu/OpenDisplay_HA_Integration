@@ -1,0 +1,128 @@
+name: Optimize MDI metadata
+
+on:
+  # Run weekly every Monday at 00:00 UTC
+  schedule:
+    - cron: "0 0 * * 1"
+
+  # Allow manual trigger
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  optimize-mdi-metadata:
+    name: Optimize MDI metadata
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@v6.2.0
+        with:
+          python-version: "3.14"
+
+      - name: Record file size before optimization
+        id: before
+        run: |
+          SIZE=$(stat -c%s custom_components/opendisplay/imagegen/assets/materialdesignicons-webfont.meta.json)
+          echo "size=$SIZE" >> "$GITHUB_OUTPUT"
+
+      - name: Run optimizer
+        run: python3 scripts/optimize_materialdesignicons_meta.py
+
+      - name: Record file size after optimization
+        id: after
+        run: |
+          SIZE=$(stat -c%s custom_components/opendisplay/imagegen/assets/materialdesignicons-webfont.meta.json)
+          echo "size=$SIZE" >> "$GITHUB_OUTPUT"
+
+      - name: Check for changes
+        id: changes
+        run: |
+          if git diff --quiet custom_components/opendisplay/imagegen/assets/materialdesignicons-webfont.meta.json; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compute size reduction
+        if: steps.changes.outputs.changed == 'true'
+        id: reduction
+        run: |
+          BEFORE="${{ steps.before.outputs.size }}"
+          AFTER="${{ steps.after.outputs.size }}"
+          SAVED=$(( BEFORE - AFTER ))
+          PCT=$(awk "BEGIN { printf \"%.1f\", ($BEFORE - $AFTER) / $BEFORE * 100 }")
+          echo "saved=$SAVED" >> "$GITHUB_OUTPUT"
+          echo "pct=$PCT" >> "$GITHUB_OUTPUT"
+
+      - name: Sanitize base branch name
+        if: steps.changes.outputs.changed == 'true'
+        id: branch_name
+        run: |
+          sanitized_ref="${GITHUB_REF_NAME//\//-}"
+          echo "sanitized_ref=$sanitized_ref" >> "$GITHUB_OUTPUT"
+
+      - name: Close existing automated PRs
+        if: steps.changes.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          existing_prs=$(gh pr list \
+            --repo "${{ github.repository }}" \
+            --head "automated/optimize-mdi-metadata-${{ steps.branch_name.outputs.sanitized_ref }}" \
+            --state open \
+            --json number \
+            --jq '.[].number')
+          for pr_number in $existing_prs; do
+            echo "Closing existing PR #$pr_number"
+            gh pr close "$pr_number" \
+              --repo "${{ github.repository }}" \
+              --comment "Superseded by a newer automated update."
+          done
+
+      - name: Create Pull Request
+        if: steps.changes.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v8.1.1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "chore: optimize materialdesignicons-webfont.meta.json"
+          title: "chore: Optimize MDI metadata"
+          body: |
+            This PR contains an optimized version of `materialdesignicons-webfont.meta.json`.
+
+            The metadata has been flattened into a direct `name/alias → codepoint` mapping,
+            removing the list-of-entries structure and empty alias arrays.
+
+            ## Size reduction
+
+            | Before | After | Saved |
+            |--------|-------|-------|
+            | ${{ steps.before.outputs.size }} bytes | ${{ steps.after.outputs.size }} bytes | ${{ steps.reduction.outputs.saved }} bytes (${{ steps.reduction.outputs.pct }}%) |
+
+            ---
+
+            *This PR was automatically created by the [optimize-mdi-metadata](${{ github.server_url }}/${{ github.repository }}/actions/workflows/optimize-mdi-metadata.yaml) workflow*
+          base: ${{ github.ref_name }}
+          branch: automated/optimize-mdi-metadata-${{ steps.branch_name.outputs.sanitized_ref }}
+          delete-branch: true
+          add-paths: |
+            custom_components/opendisplay/imagegen/assets/materialdesignicons-webfont.meta.json
+          labels: |
+            automated
+
+      - name: Summary
+        run: |
+          if [ "${{ steps.changes.outputs.changed }}" == "true" ]; then
+            echo "✅ Optimizations found — PR created"
+            echo "Size: ${{ steps.before.outputs.size }} → ${{ steps.after.outputs.size }} bytes (saved ${{ steps.reduction.outputs.saved }} bytes, ${{ steps.reduction.outputs.pct }}%)"
+          else
+            echo "✅ No changes — metadata is already fully optimized"
+          fi
