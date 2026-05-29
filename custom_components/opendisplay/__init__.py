@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from dataclasses import asdict, dataclass, is_dataclass
+from datetime import datetime
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -62,6 +63,7 @@ class OpenDisplayRuntimeData:
     is_flex: bool
     upload_task: asyncio.Task | None = None
     config_sync_task: asyncio.Task | None = None
+    deep_sleep_flush_task: asyncio.Task | None = None
     deep_sleep_upload: DeepSleepQueuedUpload | None = None
     deep_sleep_expiry_handle: asyncio.TimerHandle | None = None
 
@@ -357,6 +359,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenDisplayConfigEntry) 
                 )
         was_available = available_now
 
+        flush_task = entry.runtime_data.deep_sleep_flush_task
+        if flush_task is not None and flush_task.done():
+            entry.runtime_data.deep_sleep_flush_task = None
+
         queued = entry.runtime_data.deep_sleep_upload
         if queued is None:
             return
@@ -367,19 +373,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenDisplayConfigEntry) 
                 entry.runtime_data.deep_sleep_expiry_handle = None
             return
         if async_ble_device_from_address(hass, address, connectable=True) is None:
+            _LOGGER.debug(
+                "%s: Queued image still waiting; device is not connectable",
+                address,
+            )
             return
-        # Device is now connectable – flush the queued upload
-        entry.runtime_data.deep_sleep_upload = None
-        if (handle := entry.runtime_data.deep_sleep_expiry_handle) is not None:
-            handle.cancel()
-            entry.runtime_data.deep_sleep_expiry_handle = None
+        if entry.runtime_data.deep_sleep_flush_task is not None:
+            _LOGGER.debug("%s: Queued image flush already in progress", address)
+            return
+
+        queued_age = datetime.now() - queued.queued_at
+        ttl_left = max(0, int((queued.expiry - queued_age).total_seconds()))
 
         _LOGGER.info(
-            "%s: Device is online again; sending queued image "
-            "(sleep=%ss, ttl=%ss)",
+            "%s: Device is online again; attempting queued image upload "
+            "(sleep=%ss, ttl_left=%ss)",
             address,
             _deep_sleep_seconds(entry.runtime_data.device_config),
-            int(queued.expiry.total_seconds()),
+            ttl_left,
         )
 
         async def _flush_queued_upload() -> None:
@@ -387,17 +398,58 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenDisplayConfigEntry) 
             from .services import _async_connect_and_run  # noqa: PLC0415 – avoid circular import at module level
 
             try:
-                await _async_connect_and_run(hass, entry, queued.action)
+                await _async_connect_and_run(
+                    hass, entry, queued.action, wrap_connection_errors=False
+                )
+            except (BLEConnectionError, BLETimeoutError) as err:
+                current_queued = entry.runtime_data.deep_sleep_upload
+                if current_queued is queued and not queued.is_expired:
+                    queued_age = datetime.now() - queued.queued_at
+                    ttl_left = max(0, int((queued.expiry - queued_age).total_seconds()))
+                    _LOGGER.info(
+                        "%s: Queued image upload deferred again; keeping queue "
+                        "(ttl_left=%ss): %s",
+                        address,
+                        ttl_left,
+                        err,
+                    )
+                else:
+                    _LOGGER.debug(
+                        "%s: Queued image upload failed after wake-up but queue is no "
+                        "longer active: %s",
+                        address,
+                        err,
+                    )
             except HomeAssistantError as err:
+                if entry.runtime_data.deep_sleep_upload is queued:
+                    entry.runtime_data.deep_sleep_upload = None
+                    if (
+                        handle := entry.runtime_data.deep_sleep_expiry_handle
+                    ) is not None:
+                        handle.cancel()
+                        entry.runtime_data.deep_sleep_expiry_handle = None
                 _LOGGER.warning(
-                    "%s: Failed to send queued image after wake-up: %s",
+                    "%s: Failed to send queued image after wake-up; "
+                    "dropping queue: %s",
                     address,
                     err,
                 )
             else:
+                if entry.runtime_data.deep_sleep_upload is queued:
+                    entry.runtime_data.deep_sleep_upload = None
+                    if (
+                        handle := entry.runtime_data.deep_sleep_expiry_handle
+                    ) is not None:
+                        handle.cancel()
+                        entry.runtime_data.deep_sleep_expiry_handle = None
                 _LOGGER.info("%s: Queued image sent to display", address)
+            finally:
+                if (
+                    task := asyncio.current_task()
+                ) is not None and entry.runtime_data.deep_sleep_flush_task is task:
+                    entry.runtime_data.deep_sleep_flush_task = None
 
-        hass.async_create_task(
+        entry.runtime_data.deep_sleep_flush_task = hass.async_create_task(
             _flush_queued_upload(),
             name=f"opendisplay_deepsleep_flush_{address}",
         )
@@ -427,6 +479,11 @@ async def async_unload_entry(
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+    if (task := entry.runtime_data.deep_sleep_flush_task) and not task.done():
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+    entry.runtime_data.deep_sleep_flush_task = None
     if (task := entry.runtime_data.config_sync_task) and not task.done():
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
