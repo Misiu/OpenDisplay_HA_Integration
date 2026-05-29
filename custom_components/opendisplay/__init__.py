@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from dataclasses import asdict, dataclass, is_dataclass
+import logging
+from typing import TYPE_CHECKING, Any
 
 from opendisplay import (
     AuthenticationFailedError,
@@ -21,7 +22,11 @@ from homeassistant.components.bluetooth import async_ble_device_from_address
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.exceptions import (
+    ConfigEntryAuthFailed,
+    ConfigEntryNotReady,
+    HomeAssistantError,
+)
 from homeassistant.helpers import config_validation as cv, device_registry as dr
 from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH
 from homeassistant.helpers.typing import ConfigType
@@ -30,6 +35,9 @@ if TYPE_CHECKING:
     from opendisplay.models import FirmwareVersion
 
 from .const import (
+    CONF_CACHED_DEVICE_CONFIG,
+    CONF_CACHED_FIRMWARE,
+    CONF_CACHED_IS_FLEX,
     CONF_ENCRYPTION_KEY,
     DOMAIN,
 )
@@ -38,6 +46,7 @@ from .deep_sleep import DeepSleepQueuedUpload
 from .services import async_setup_services
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+_LOGGER = logging.getLogger(__name__)
 
 _BASE_PLATFORMS: list[Platform] = [Platform.IMAGE, Platform.SENSOR]
 _FLEX_PLATFORMS = [Platform.EVENT, Platform.IMAGE, Platform.SENSOR, Platform.UPDATE]
@@ -57,6 +66,92 @@ class OpenDisplayRuntimeData:
 
 
 type OpenDisplayConfigEntry = ConfigEntry[OpenDisplayRuntimeData]
+
+
+def _serialize_device_config(device_config: GlobalConfig) -> dict[str, Any] | None:
+    """Serialize GlobalConfig into plain dict for ConfigEntry storage."""
+    if hasattr(device_config, "model_dump"):
+        dumped = device_config.model_dump()
+        if isinstance(dumped, dict):
+            return dumped
+    if hasattr(device_config, "dict"):
+        dumped = device_config.dict()
+        if isinstance(dumped, dict):
+            return dumped
+    if hasattr(device_config, "to_dict"):
+        dumped = device_config.to_dict()
+        if isinstance(dumped, dict):
+            return dumped
+    if is_dataclass(device_config):
+        dumped = asdict(device_config)
+        if isinstance(dumped, dict):
+            return dumped
+    return None
+
+
+def _deserialize_device_config(raw: object) -> GlobalConfig | None:
+    """Deserialize plain dict into GlobalConfig."""
+    if not isinstance(raw, dict):
+        return None
+    if hasattr(GlobalConfig, "model_validate"):
+        try:
+            return GlobalConfig.model_validate(raw)
+        except Exception:
+            pass
+    if hasattr(GlobalConfig, "parse_obj"):
+        try:
+            return GlobalConfig.parse_obj(raw)
+        except Exception:
+            pass
+    if hasattr(GlobalConfig, "from_dict"):
+        try:
+            return GlobalConfig.from_dict(raw)
+        except Exception:
+            pass
+    try:
+        return GlobalConfig(**raw)
+    except Exception:
+        return None
+
+
+def _cached_runtime_data(
+    entry: OpenDisplayConfigEntry,
+) -> tuple[FirmwareVersion, GlobalConfig, bool] | None:
+    """Return cached runtime metadata if valid."""
+    raw_firmware = entry.data.get(CONF_CACHED_FIRMWARE)
+    raw_device_config = entry.data.get(CONF_CACHED_DEVICE_CONFIG)
+    raw_is_flex = entry.data.get(CONF_CACHED_IS_FLEX)
+    if not isinstance(raw_firmware, dict) or not isinstance(raw_is_flex, bool):
+        return None
+    device_config = _deserialize_device_config(raw_device_config)
+    if device_config is None:
+        return None
+    return raw_firmware, device_config, raw_is_flex
+
+
+def _deep_sleep_seconds(device_config: GlobalConfig) -> int:
+    """Return deep sleep duration from device config."""
+    return int(device_config.power.deep_sleep_time_seconds)
+
+
+def _cache_runtime_data(
+    hass: HomeAssistant,
+    entry: OpenDisplayConfigEntry,
+    firmware: FirmwareVersion,
+    device_config: GlobalConfig,
+    is_flex: bool,
+) -> None:
+    """Persist runtime metadata so sleeping devices can restore quickly."""
+    if not isinstance(firmware, dict):
+        return
+    serialized = _serialize_device_config(device_config)
+    if serialized is None:
+        return
+    data = dict(entry.data)
+    data[CONF_CACHED_FIRMWARE] = firmware
+    data[CONF_CACHED_DEVICE_CONFIG] = serialized
+    data[CONF_CACHED_IS_FLEX] = is_flex
+    hass.config_entries.async_update_entry(entry, data=data)
 
 
 def _get_encryption_key(entry: OpenDisplayConfigEntry) -> bytes | None:
@@ -88,31 +183,56 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenDisplayConfigEntry) 
     if TYPE_CHECKING:
         assert address is not None
 
+    cached_runtime = _cached_runtime_data(entry)
     ble_device = async_ble_device_from_address(hass, address, connectable=True)
-    if ble_device is None:
-        raise ConfigEntryNotReady(
-            f"Could not find OpenDisplay device with address {address}"
-        )
-
     encryption_key = _get_encryption_key(entry)
+    fw: FirmwareVersion
+    device_config: GlobalConfig
+    is_flex: bool
 
-    try:
-        async with OpenDisplayDevice(
-            mac_address=address, ble_device=ble_device, encryption_key=encryption_key
-        ) as device:
-            fw = await device.read_firmware_version()
-            is_flex = device.is_flex
-    except (AuthenticationFailedError, AuthenticationRequiredError) as err:
-        raise ConfigEntryAuthFailed(
-            f"Encryption key rejected by OpenDisplay device: {err}"
-        ) from err
-    except (BLEConnectionError, BLETimeoutError, OpenDisplayError) as err:
-        raise ConfigEntryNotReady(
-            f"Failed to connect to OpenDisplay device: {err}"
-        ) from err
-    device_config = device.config
-    if TYPE_CHECKING:
-        assert device_config is not None
+    if ble_device is None:
+        if cached_runtime is None or _deep_sleep_seconds(cached_runtime[1]) <= 0:
+            raise ConfigEntryNotReady(
+                f"Could not find OpenDisplay device with address {address}"
+            )
+        fw, device_config, is_flex = cached_runtime
+        _LOGGER.info(
+            "%s: Device not connectable at startup; using cached config "
+            "(deep sleep=%ss, assumed state)",
+            address,
+            _deep_sleep_seconds(device_config),
+        )
+    else:
+        try:
+            async with OpenDisplayDevice(
+                mac_address=address,
+                ble_device=ble_device,
+                encryption_key=encryption_key,
+            ) as device:
+                fw = await device.read_firmware_version()
+                is_flex = device.is_flex
+                device_config = device.config
+                if TYPE_CHECKING:
+                    assert device_config is not None
+        except (AuthenticationFailedError, AuthenticationRequiredError) as err:
+            raise ConfigEntryAuthFailed(
+                f"Encryption key rejected by OpenDisplay device: {err}"
+            ) from err
+        except (BLEConnectionError, BLETimeoutError, OpenDisplayError) as err:
+            if cached_runtime is None or _deep_sleep_seconds(cached_runtime[1]) <= 0:
+                raise ConfigEntryNotReady(
+                    f"Failed to connect to OpenDisplay device: {err}"
+                ) from err
+            fw, device_config, is_flex = cached_runtime
+            _LOGGER.info(
+                "%s: Startup connection failed (%s); using cached config "
+                "(deep sleep=%ss, assumed state)",
+                address,
+                err,
+                _deep_sleep_seconds(device_config),
+            )
+        else:
+            _cache_runtime_data(hass, entry, fw, device_config, is_flex)
 
     coordinator = OpenDisplayCoordinator(hass, address)
 
@@ -178,9 +298,32 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenDisplayConfigEntry) 
         if (handle := entry.runtime_data.deep_sleep_expiry_handle) is not None:
             handle.cancel()
             entry.runtime_data.deep_sleep_expiry_handle = None
-        from .services import _async_connect_and_run  # noqa: PLC0415 – avoid circular import at module level
+
+        _LOGGER.info(
+            "%s: Device is online again; sending queued image "
+            "(sleep=%ss, ttl=%ss)",
+            address,
+            _deep_sleep_seconds(entry.runtime_data.device_config),
+            int(queued.expiry.total_seconds()),
+        )
+
+        async def _flush_queued_upload() -> None:
+            """Send queued upload once the device wakes up."""
+            from .services import _async_connect_and_run  # noqa: PLC0415 – avoid circular import at module level
+
+            try:
+                await _async_connect_and_run(hass, entry, queued.action)
+            except HomeAssistantError as err:
+                _LOGGER.warning(
+                    "%s: Failed to send queued image after wake-up: %s",
+                    address,
+                    err,
+                )
+            else:
+                _LOGGER.info("%s: Queued image sent to display", address)
+
         hass.async_create_task(
-            _async_connect_and_run(hass, entry, queued.action),
+            _flush_queued_upload(),
             name=f"opendisplay_deepsleep_flush_{address}",
         )
 
