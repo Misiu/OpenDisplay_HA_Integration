@@ -8,9 +8,10 @@ from opendisplay import voltage_to_percent
 from opendisplay.models.enums import CapacityEstimator, PowerMode
 
 from homeassistant.components.sensor import (
+    RestoreSensor,
     SensorDeviceClass,
-    SensorEntity,
     SensorEntityDescription,
+    SensorExtraStoredData,
     SensorStateClass,
 )
 from homeassistant.const import (
@@ -121,14 +122,30 @@ async def async_setup_entry(
     )
 
 
-class OpenDisplaySensorEntity(OpenDisplayEntity, SensorEntity):
+class OpenDisplaySensorEntity(OpenDisplayEntity, RestoreSensor):
     """A sensor entity for an OpenDisplay device."""
 
     entity_description: OpenDisplaySensorEntityDescription
 
+    def __init__(
+        self,
+        coordinator,
+        description: OpenDisplaySensorEntityDescription,
+    ) -> None:
+        """Initialize the sensor entity."""
+        super().__init__(coordinator, description)
+        self._restored_data: SensorExtraStoredData | None = None
+
+    async def async_added_to_hass(self) -> None:
+        """Restore the last native value for sleeping devices after restart."""
+        await super().async_added_to_hass()
+        self._restored_data = await self.async_get_last_sensor_data()
+
     @property
     def native_value(self) -> float | int | str | datetime | None:
         """Return the sensor value."""
-        if self.coordinator.data is None:
+        if self.coordinator.data is not None:
+            return self.entity_description.value_fn(self.coordinator.data)
+        if self._restored_data is None:
             return None
-        return self.entity_description.value_fn(self.coordinator.data)
+        return self._restored_data.native_value

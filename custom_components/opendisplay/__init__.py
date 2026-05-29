@@ -36,6 +36,7 @@ from homeassistant.exceptions import (
 )
 from homeassistant.helpers import config_validation as cv, device_registry as dr
 from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.typing import ConfigType
 
 if TYPE_CHECKING:
@@ -47,6 +48,7 @@ from .const import (
     CONF_CACHED_IS_FLEX,
     CONF_ENCRYPTION_KEY,
     DOMAIN,
+    SIGNAL_IMAGE_UPDATED,
 )
 from .coordinator import OpenDisplayCoordinator
 from .deep_sleep import DeepSleepQueuedUpload, deep_sleep_seconds
@@ -57,6 +59,7 @@ _LOGGER = logging.getLogger(__name__)
 
 _BASE_PLATFORMS: list[Platform] = [Platform.IMAGE, Platform.SENSOR]
 _FLEX_PLATFORMS = [Platform.EVENT, Platform.IMAGE, Platform.SENSOR, Platform.UPDATE]
+_CONNECT_SETUP_TIMEOUT_SECONDS = 20
 
 
 @dataclass
@@ -314,20 +317,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenDisplayConfigEntry) 
         )
     else:
         try:
-            async with OpenDisplayDevice(
-                mac_address=address,
-                ble_device=ble_device,
-                encryption_key=encryption_key,
-            ) as device:
-                fw = await device.read_firmware_version()
-                is_flex = device.is_flex
-                device_config = device.config
-                if TYPE_CHECKING:
-                    assert device_config is not None
+            async with asyncio.timeout(_CONNECT_SETUP_TIMEOUT_SECONDS):
+                async with OpenDisplayDevice(
+                    mac_address=address,
+                    ble_device=ble_device,
+                    encryption_key=encryption_key,
+                ) as device:
+                    fw = await device.read_firmware_version()
+                    is_flex = device.is_flex
+                    device_config = device.config
+                    if TYPE_CHECKING:
+                        assert device_config is not None
         except (AuthenticationFailedError, AuthenticationRequiredError) as err:
             raise ConfigEntryAuthFailed(
                 f"Encryption key rejected by OpenDisplay device: {err}"
             ) from err
+        except TimeoutError as err:
+            if cached_runtime is None or _deep_sleep_seconds(cached_runtime[1]) <= 0:
+                raise ConfigEntryNotReady(
+                    "Timed out while connecting to OpenDisplay device"
+                ) from err
+            fw, device_config, is_flex = cached_runtime
+            _LOGGER.info(
+                "%s: Startup connection timed out; using cached config "
+                "(deep sleep=%ss, assumed state)",
+                address,
+                _deep_sleep_seconds(device_config),
+            )
         except (BLEConnectionError, BLETimeoutError, OpenDisplayError) as err:
             if cached_runtime is None or _deep_sleep_seconds(cached_runtime[1]) <= 0:
                 raise ConfigEntryNotReady(
@@ -396,16 +412,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenDisplayConfigEntry) 
             return
 
         try:
-            async with OpenDisplayDevice(
-                mac_address=address,
-                ble_device=ble_online,
-                encryption_key=encryption_key,
-            ) as device:
-                latest_fw = await device.read_firmware_version()
-                latest_config = device.config
-                if TYPE_CHECKING:
-                    assert latest_config is not None
-                latest_is_flex = device.is_flex
+            async with asyncio.timeout(_CONNECT_SETUP_TIMEOUT_SECONDS):
+                async with OpenDisplayDevice(
+                    mac_address=address,
+                    ble_device=ble_online,
+                    encryption_key=encryption_key,
+                ) as device:
+                    latest_fw = await device.read_firmware_version()
+                    latest_config = device.config
+                    if TYPE_CHECKING:
+                        assert latest_config is not None
+                    latest_is_flex = device.is_flex
+        except TimeoutError:
+            _LOGGER.debug("%s: Runtime config sync timed out", address)
+            return
         except (AuthenticationFailedError, AuthenticationRequiredError) as err:
             _LOGGER.debug(
                 "%s: Skipping runtime config sync due to auth error: %s",
@@ -459,7 +479,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenDisplayConfigEntry) 
             )
             return
         if entry.runtime_data.deep_sleep_flush_task is not None:
-            _LOGGER.debug("%s: Queued image flush already in progress", address)
             return
 
         queued_age = datetime.now() - queued.queued_at
@@ -522,6 +541,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenDisplayConfigEntry) 
                     ) is not None:
                         handle.cancel()
                         entry.runtime_data.deep_sleep_expiry_handle = None
+                if queued.jpeg_bytes:
+                    async_dispatcher_send(
+                        hass,
+                        f"{SIGNAL_IMAGE_UPDATED}_{address}",
+                        queued.jpeg_bytes,
+                    )
                 _LOGGER.info("%s: Queued image sent to display", address)
             finally:
                 if (

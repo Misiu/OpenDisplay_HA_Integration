@@ -120,6 +120,7 @@ def _make_entry(address: str = "AA:BB:CC:DD:EE:FF", deep_sleep_time_seconds: int
 async def test_send_image_queues_when_device_not_connectable() -> None:
     """Image upload is queued when the BLE device is not currently connectable."""
     hass = MagicMock()
+    hass.async_add_executor_job = AsyncMock(return_value=b"jpeg")
     entry = _make_entry()
 
     img = MagicMock()
@@ -137,6 +138,7 @@ async def test_send_image_queues_when_device_not_connectable() -> None:
 
     # Upload should have been queued, not sent
     assert entry.runtime_data.deep_sleep_upload is not None
+    assert entry.runtime_data.deep_sleep_upload.jpeg_bytes == b"jpeg"
     assert not entry.runtime_data.deep_sleep_upload.is_expired
 
 
@@ -144,6 +146,7 @@ async def test_send_image_queues_when_device_not_connectable() -> None:
 async def test_send_image_queue_log_includes_sleep_and_ttl(caplog: pytest.LogCaptureFixture) -> None:
     """Queue log includes deep sleep and TTL when device is not connectable."""
     hass = MagicMock()
+    hass.async_add_executor_job = AsyncMock(return_value=b"jpeg")
     entry = _make_entry(deep_sleep_time_seconds=300)
     img = MagicMock()
 
@@ -213,6 +216,7 @@ async def test_send_image_queues_when_connection_times_out(
 ) -> None:
     """Image upload is queued when connection fails but deep sleep is enabled."""
     hass = MagicMock()
+    hass.async_add_executor_job = AsyncMock(return_value=b"jpeg")
     entry = _make_entry(deep_sleep_time_seconds=3600)
     img = MagicMock()
 
@@ -243,6 +247,7 @@ async def test_send_image_queues_when_connection_times_out(
             )
 
     assert entry.runtime_data.deep_sleep_upload is not None
+    assert entry.runtime_data.deep_sleep_upload.jpeg_bytes == b"jpeg"
     mock_run.assert_awaited_once()
     queue_logs = [
         rec.getMessage() for rec in caplog.records if "Queued image upload for" in rec.getMessage()
@@ -258,6 +263,7 @@ async def test_send_image_queued_upload_replaces_previous(
 ) -> None:
     """A new image upload replaces any previously queued upload."""
     hass = MagicMock()
+    hass.async_add_executor_job = AsyncMock(return_value=b"jpeg")
     entry = _make_entry(deep_sleep_time_seconds=300)
     old_handle = MagicMock()
     new_handle = MagicMock()
@@ -307,6 +313,7 @@ async def test_send_image_queued_upload_replaces_previous(
 async def test_expiry_derived_from_device_deep_sleep_time() -> None:
     """Expiry is computed as deep_sleep_time_seconds * 1.1 from device config."""
     hass = MagicMock()
+    hass.async_add_executor_job = AsyncMock(return_value=b"jpeg")
     entry = _make_entry(deep_sleep_time_seconds=3600)
 
     img = MagicMock()
@@ -370,6 +377,7 @@ async def test_send_image_uploads_immediately_when_deep_sleep_is_unsupported(
 async def test_expiry_callback_purges_queued_upload_without_advertisement() -> None:
     """Queued upload is proactively removed when expiry timer callback runs."""
     hass = MagicMock()
+    hass.async_add_executor_job = AsyncMock(return_value=b"jpeg")
     entry = _make_entry(deep_sleep_time_seconds=10)
     img = MagicMock()
 

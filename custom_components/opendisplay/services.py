@@ -353,7 +353,12 @@ async def _async_send_image(
             rotate=rotate,
         )
 
-    def _queue_for_deep_sleep(*, reason: str, error: Exception | None = None) -> None:
+    def _queue_for_deep_sleep(
+        *,
+        reason: str,
+        jpeg_bytes: bytes,
+        error: Exception | None = None,
+    ) -> None:
         """Queue upload until the sleeping device becomes connectable again."""
         expiry_seconds = int(sleep_seconds * 1.1)
         now = datetime.now()
@@ -366,7 +371,7 @@ async def _async_send_image(
 
         queued_upload = DeepSleepQueuedUpload(
             action=_upload,
-            jpeg_bytes=b"",
+            jpeg_bytes=jpeg_bytes,
             queued_at=now,
             expiry=timedelta(seconds=expiry_seconds),
         )
@@ -409,7 +414,8 @@ async def _async_send_image(
 
     if not is_connectable_now and deep_sleep_active:
         # Device is sleeping right now – queue the upload for when it wakes.
-        _queue_for_deep_sleep(reason="device not connectable")
+        jpeg = await hass.async_add_executor_job(_pil_to_jpeg, img)
+        _queue_for_deep_sleep(reason="device not connectable", jpeg_bytes=jpeg)
         return
     if deep_sleep_active and is_connectable_now:
         _LOGGER.info(
@@ -430,7 +436,12 @@ async def _async_send_image(
         )
     except (BLEConnectionError, BLETimeoutError) as err:
         if deep_sleep_active:
-            _queue_for_deep_sleep(reason="connection failed", error=err)
+            jpeg = await hass.async_add_executor_job(_pil_to_jpeg, img)
+            _queue_for_deep_sleep(
+                reason="connection failed",
+                jpeg_bytes=jpeg,
+                error=err,
+            )
             return
         raise HomeAssistantError(
             translation_domain=DOMAIN,

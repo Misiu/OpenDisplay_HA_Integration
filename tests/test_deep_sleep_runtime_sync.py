@@ -343,7 +343,7 @@ async def test_queued_upload_is_cleared_when_wake_flush_succeeds() -> None:
 
     queued_upload = DeepSleepQueuedUpload(
         action=AsyncMock(),
-        jpeg_bytes=b"",
+        jpeg_bytes=b"queued-jpeg",
         queued_at=datetime.now() - timedelta(seconds=20),
         expiry=timedelta(seconds=330),
     )
@@ -366,6 +366,7 @@ async def test_queued_upload_is_cleared_when_wake_flush_succeeds() -> None:
             "custom_components.opendisplay.services._async_connect_and_run",
             new_callable=AsyncMock,
         ) as mock_connect,
+        patch("custom_components.opendisplay.async_dispatcher_send") as mock_dispatch,
     ):
         assert await async_setup_entry(hass, entry) is True
         entry.runtime_data.deep_sleep_upload = queued_upload
@@ -381,10 +382,131 @@ async def test_queued_upload_is_cleared_when_wake_flush_succeeds() -> None:
         queued_upload.action,
         wrap_connection_errors=False,
     )
+    mock_dispatch.assert_called_once_with(
+        hass,
+        "opendisplay_image_updated_AA:BB:CC:DD:EE:FF",
+        b"queued-jpeg",
+    )
     assert entry.runtime_data.deep_sleep_upload is None
     assert entry.runtime_data.deep_sleep_expiry_handle is None
     assert entry.runtime_data.deep_sleep_flush_task is None
     expiry_handle.cancel.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_restart_connect_timeout_uses_cached_runtime_for_sleeping_device() -> None:
+    """Startup connect timeout falls back to cache when deep sleep is configured."""
+    hass = _make_hass()
+    entry = _make_entry()
+    coordinator = _FakeCoordinator()
+
+    cached_config = _make_device_config(300)
+
+    with (
+        patch(
+            "custom_components.opendisplay._cached_runtime_data",
+            return_value=({"major": 1, "minor": 0}, cached_config, False),
+        ),
+        patch(
+            "custom_components.opendisplay.OpenDisplayCoordinator",
+            return_value=coordinator,
+        ),
+        patch("custom_components.opendisplay.dr.async_get", return_value=MagicMock()),
+        patch("custom_components.opendisplay.OpenDisplayDevice", AsyncMock()),
+        patch(
+            "custom_components.opendisplay.async_ble_device_from_address",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "custom_components.opendisplay.asyncio.timeout",
+            side_effect=TimeoutError,
+        ),
+        patch("custom_components.opendisplay._cache_runtime_data"),
+    ):
+        assert await async_setup_entry(hass, entry) is True
+
+    assert entry.runtime_data.device_config.power.deep_sleep_time_seconds == 300
+
+
+@pytest.mark.asyncio
+async def test_queued_upload_does_not_spawn_duplicate_flush_when_listener_reenters(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A second coordinator update while flushing must not start another flush."""
+    hass = _make_hass()
+    entry = _make_entry()
+    coordinator = _FakeCoordinator()
+    initial_config = _make_device_config(300)
+
+    class _FakeDevice:
+        def __init__(self, **kwargs) -> None:
+            self.is_flex = False
+            self.config = initial_config
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def read_firmware_version(self):
+            return {"major": 1, "minor": 0}
+
+    queued_upload = DeepSleepQueuedUpload(
+        action=AsyncMock(),
+        jpeg_bytes=b"",
+        queued_at=datetime.now() - timedelta(seconds=20),
+        expiry=timedelta(seconds=330),
+    )
+    expiry_handle = MagicMock()
+    flush_started = asyncio.Event()
+    allow_flush_to_finish = asyncio.Event()
+
+    async def _blocked_connect_and_run(*args, **kwargs):
+        flush_started.set()
+        await allow_flush_to_finish.wait()
+
+    with (
+        patch("custom_components.opendisplay._cached_runtime_data", return_value=None),
+        patch(
+            "custom_components.opendisplay.OpenDisplayCoordinator",
+            return_value=coordinator,
+        ),
+        patch("custom_components.opendisplay.dr.async_get", return_value=MagicMock()),
+        patch("custom_components.opendisplay.OpenDisplayDevice", _FakeDevice),
+        patch(
+            "custom_components.opendisplay.async_ble_device_from_address",
+            return_value=MagicMock(),
+        ),
+        patch("custom_components.opendisplay._cache_runtime_data"),
+        patch(
+            "custom_components.opendisplay.services._async_connect_and_run",
+            new_callable=AsyncMock,
+            side_effect=_blocked_connect_and_run,
+        ) as mock_connect,
+        caplog.at_level(logging.DEBUG),
+    ):
+        assert await async_setup_entry(hass, entry) is True
+        entry.runtime_data.deep_sleep_upload = queued_upload
+        entry.runtime_data.deep_sleep_expiry_handle = expiry_handle
+
+        coordinator.available = True
+        coordinator.listener()
+        await asyncio.wait_for(flush_started.wait(), timeout=1)
+
+        coordinator.listener()
+        allow_flush_to_finish.set()
+        await asyncio.gather(*hass._test_tasks)
+
+    mock_connect.assert_awaited_once_with(
+        hass,
+        entry,
+        queued_upload.action,
+        wrap_connection_errors=False,
+    )
+    assert entry.runtime_data.deep_sleep_upload is None
+    assert entry.runtime_data.deep_sleep_flush_task is None
+    assert "Queued image flush already in progress" not in caplog.text
 
 
 @pytest.mark.asyncio

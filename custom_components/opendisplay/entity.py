@@ -42,12 +42,19 @@ class OpenDisplayEntity(
     def available(self) -> bool:
         """Return True when device is online or assumed online due to deep sleep."""
         if self.coordinator.available:
-            self._attr_assumed_state = False
             return True
 
+        return self._deep_sleep_active
+
+    @property
+    def assumed_state(self) -> bool:
+        """Return True while state is inferred for sleeping devices."""
+        return (not self.coordinator.available) and self._deep_sleep_active
+
+    @property
+    def _deep_sleep_active(self) -> bool:
+        """Return whether deep sleep should keep entities available."""
         device_config = self.coordinator.config_entry.runtime_data.device_config
-        deep_sleep_active = supports_deep_sleep(device_config) and deep_sleep_enabled(
+        return supports_deep_sleep(device_config) and deep_sleep_enabled(
             device_config
         )
-        self._attr_assumed_state = deep_sleep_active
-        return deep_sleep_active
