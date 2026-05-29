@@ -63,6 +63,38 @@ def test_queued_upload_not_expired_with_custom_expiry() -> None:
     assert not q.is_expired
 
 
+def test_upload_image_schema_accepts_none_rotation() -> None:
+    """Upload image schema should map the frontend 'none' sentinel to default rotation."""
+    from opendisplay import Rotation
+    from custom_components.opendisplay.services import SCHEMA_UPLOAD_IMAGE
+
+    validated = SCHEMA_UPLOAD_IMAGE(
+        {
+            "device_id": "device_1",
+            "image": {"media_content_id": "media-source://image"},
+            "rotation": "none",
+        }
+    )
+
+    assert validated["rotation"] == Rotation.ROTATE_0
+
+
+def test_drawcustom_schema_accepts_none_numeric_fields() -> None:
+    """Drawcustom schema should map 'none' to default numeric values."""
+    from custom_components.opendisplay.services import SCHEMA_DRAWCUSTOM
+
+    validated = SCHEMA_DRAWCUSTOM(
+        {
+            "payload": [],
+            "rotate": "none",
+            "refresh_type": "none",
+        }
+    )
+
+    assert validated["rotate"] == 0
+    assert validated["refresh_type"] == 0
+
+
 # ---------------------------------------------------------------------------
 # _async_send_image queuing behaviour
 # ---------------------------------------------------------------------------
