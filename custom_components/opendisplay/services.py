@@ -276,6 +276,8 @@ async def _async_connect_and_run(
         )
 
     raw_key = entry.data.get(CONF_ENCRYPTION_KEY)
+    if isinstance(raw_key, (bytes, bytearray)):
+        raw_key = bytes(raw_key).hex()
     if raw_key is not None and len(raw_key) != 32:
         entry.async_start_reauth(hass)
         raise HomeAssistantError(

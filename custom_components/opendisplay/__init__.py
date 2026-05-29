@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime
 import logging
@@ -18,6 +19,11 @@ from opendisplay import (
     OpenDisplayDevice,
     OpenDisplayError,
 )
+try:
+    from opendisplay.models.config_json import config_from_json, config_to_json
+except ImportError:
+    config_from_json = None
+    config_to_json = None
 
 from homeassistant.components.bluetooth import async_ble_device_from_address
 from homeassistant.config_entries import ConfigEntry
@@ -73,6 +79,14 @@ type OpenDisplayConfigEntry = ConfigEntry[OpenDisplayRuntimeData]
 
 def _serialize_device_config(device_config: GlobalConfig) -> dict[str, Any] | None:
     """Serialize GlobalConfig into plain dict for ConfigEntry storage."""
+    if config_to_json is not None:
+        try:
+            dumped = config_to_json(device_config)
+        except Exception:
+            pass
+        else:
+            if isinstance(dumped, dict):
+                return dumped
     if hasattr(device_config, "model_dump"):
         dumped = device_config.model_dump()
         if isinstance(dumped, dict):
@@ -96,6 +110,11 @@ def _deserialize_device_config(raw: object) -> GlobalConfig | None:
     """Deserialize plain dict into GlobalConfig."""
     if not isinstance(raw, dict):
         return None
+    if config_from_json is not None:
+        try:
+            return config_from_json(raw)
+        except Exception:
+            pass
     if hasattr(GlobalConfig, "model_validate"):
         try:
             return GlobalConfig.model_validate(raw)
@@ -117,13 +136,70 @@ def _deserialize_device_config(raw: object) -> GlobalConfig | None:
         return None
 
 
+def _normalize_stored_encryption_key(raw: object) -> str | None:
+    """Normalize stored encryption key into a lowercase hex string."""
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        return raw.strip().lower()
+    if isinstance(raw, (bytes, bytearray)):
+        raw_bytes = bytes(raw)
+        if len(raw_bytes) == 16:
+            return raw_bytes.hex()
+        try:
+            return raw_bytes.decode().strip().lower()
+        except UnicodeDecodeError:
+            return None
+    return None
+
+
+def _contains_bytes(value: object) -> bool:
+    """Return True if the structure contains raw bytes."""
+    if isinstance(value, (bytes, bytearray)):
+        return True
+    if isinstance(value, Mapping):
+        return any(_contains_bytes(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_contains_bytes(item) for item in value)
+    return False
+
+
+def _normalize_entry_data(data: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize config entry data so Home Assistant can persist it."""
+    normalized = dict(data)
+
+    raw_key = normalized.get(CONF_ENCRYPTION_KEY)
+    normalized_key = _normalize_stored_encryption_key(raw_key)
+    if raw_key is None:
+        normalized.pop(CONF_ENCRYPTION_KEY, None)
+    elif normalized_key is None:
+        normalized.pop(CONF_ENCRYPTION_KEY, None)
+    else:
+        normalized[CONF_ENCRYPTION_KEY] = normalized_key
+
+    raw_device_config = normalized.get(CONF_CACHED_DEVICE_CONFIG)
+    if isinstance(raw_device_config, dict):
+        if _deserialize_device_config(raw_device_config) is None or _contains_bytes(
+            raw_device_config
+        ):
+            normalized.pop(CONF_CACHED_DEVICE_CONFIG, None)
+            normalized.pop(CONF_CACHED_FIRMWARE, None)
+            normalized.pop(CONF_CACHED_IS_FLEX, None)
+    elif raw_device_config is not None:
+        normalized.pop(CONF_CACHED_DEVICE_CONFIG, None)
+        normalized.pop(CONF_CACHED_FIRMWARE, None)
+        normalized.pop(CONF_CACHED_IS_FLEX, None)
+
+    return normalized
+
+
 def _cached_runtime_data(
-    entry: OpenDisplayConfigEntry,
+    entry_data: Mapping[str, Any],
 ) -> tuple[FirmwareVersion, GlobalConfig, bool] | None:
     """Return cached runtime metadata if valid."""
-    raw_firmware = entry.data.get(CONF_CACHED_FIRMWARE)
-    raw_device_config = entry.data.get(CONF_CACHED_DEVICE_CONFIG)
-    raw_is_flex = entry.data.get(CONF_CACHED_IS_FLEX)
+    raw_firmware = entry_data.get(CONF_CACHED_FIRMWARE)
+    raw_device_config = entry_data.get(CONF_CACHED_DEVICE_CONFIG)
+    raw_is_flex = entry_data.get(CONF_CACHED_IS_FLEX)
     if not isinstance(raw_firmware, dict) or not isinstance(raw_is_flex, bool):
         return None
     device_config = _deserialize_device_config(raw_device_config)
@@ -184,9 +260,9 @@ def _cache_runtime_data(
     hass.config_entries.async_update_entry(entry, data=data)
 
 
-def _get_encryption_key(entry: OpenDisplayConfigEntry) -> bytes | None:
+def _get_encryption_key(entry_data: Mapping[str, Any]) -> bytes | None:
     """Return the encryption key bytes from entry data, or None."""
-    raw = entry.data.get(CONF_ENCRYPTION_KEY)
+    raw = _normalize_stored_encryption_key(entry_data.get(CONF_ENCRYPTION_KEY))
     if raw is None:
         return None
     if len(raw) != 32:
@@ -209,13 +285,17 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: OpenDisplayConfigEntry) -> bool:
     """Set up OpenDisplay from a config entry."""
+    entry_data = _normalize_entry_data(entry.data)
+    if entry_data != entry.data:
+        hass.config_entries.async_update_entry(entry, data=entry_data)
+
     address = entry.unique_id
     if TYPE_CHECKING:
         assert address is not None
 
-    cached_runtime = _cached_runtime_data(entry)
+    cached_runtime = _cached_runtime_data(entry_data)
     ble_device = async_ble_device_from_address(hass, address, connectable=True)
-    encryption_key = _get_encryption_key(entry)
+    encryption_key = _get_encryption_key(entry_data)
     fw: FirmwareVersion
     device_config: GlobalConfig
     is_flex: bool

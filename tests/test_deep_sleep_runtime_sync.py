@@ -12,6 +12,12 @@ import pytest
 
 import custom_components.opendisplay as opendisplay_integration
 from custom_components.opendisplay import async_setup_entry
+from custom_components.opendisplay.const import (
+    CONF_CACHED_DEVICE_CONFIG,
+    CONF_CACHED_FIRMWARE,
+    CONF_CACHED_IS_FLEX,
+    CONF_ENCRYPTION_KEY,
+)
 from custom_components.opendisplay.deep_sleep import DeepSleepQueuedUpload
 
 
@@ -82,6 +88,49 @@ def _make_entry() -> MagicMock:
     entry.data = {}
     entry.async_on_unload = MagicMock()
     return entry
+
+
+def test_normalize_entry_data_converts_legacy_key_and_drops_byte_cache() -> None:
+    """Legacy byte values must not remain in config-entry storage."""
+    normalized = opendisplay_integration._normalize_entry_data(
+        {
+            CONF_ENCRYPTION_KEY: b"\x01" * 16,
+            CONF_CACHED_FIRMWARE: {"major": 1, "minor": 0},
+            CONF_CACHED_DEVICE_CONFIG: {
+                "system": {"reserved": b"\x00" * 15},
+                "manufacturer": {"reserved": b"\x00" * 18},
+            },
+            CONF_CACHED_IS_FLEX: False,
+        }
+    )
+
+    assert normalized[CONF_ENCRYPTION_KEY] == "01" * 16
+    assert CONF_CACHED_DEVICE_CONFIG not in normalized
+    assert CONF_CACHED_FIRMWARE not in normalized
+    assert CONF_CACHED_IS_FLEX not in normalized
+
+
+def test_cache_runtime_data_uses_json_safe_device_config() -> None:
+    """Cached device config should use the library JSON serializer."""
+    hass = _make_hass()
+    entry = _make_entry()
+    firmware = {"major": 1, "minor": 2}
+    serialized_config = {"version": 1, "packets": []}
+
+    with patch(
+        "custom_components.opendisplay.config_to_json",
+        return_value=serialized_config,
+    ):
+        opendisplay_integration._cache_runtime_data(
+            hass, entry, firmware, MagicMock(), False
+        )
+
+    hass.config_entries.async_update_entry.assert_called_once()
+    assert hass.config_entries.async_update_entry.call_args.kwargs["data"] == {
+        CONF_CACHED_FIRMWARE: firmware,
+        CONF_CACHED_DEVICE_CONFIG: serialized_config,
+        CONF_CACHED_IS_FLEX: False,
+    }
 
 
 @pytest.mark.asyncio

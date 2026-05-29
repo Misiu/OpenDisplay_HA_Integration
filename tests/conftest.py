@@ -186,7 +186,6 @@ def _stub_opendisplay() -> None:
 
 _stub_opendisplay()
 
-import homeassistant.helpers.selector  # ensure it's loaded first  # noqa: E402
 
 
 def _stub_ha_selector() -> None:

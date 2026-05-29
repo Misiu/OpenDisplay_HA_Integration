@@ -7,7 +7,6 @@ the entity is correctly reported as available.
 
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from custom_components.opendisplay.coordinator import (
     BluetoothScanningMode,
