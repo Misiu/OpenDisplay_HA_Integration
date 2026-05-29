@@ -92,8 +92,9 @@ async def test_restart_during_deep_sleep_uses_cached_runtime_and_syncs_when_avai
     latest_fw = {"major": 9, "minor": 9}
 
     class _FakeDevice:
-        is_flex = False
-        config = latest_config
+        def __init__(self, **kwargs) -> None:
+            self.is_flex = False
+            self.config = latest_config
 
         async def __aenter__(self):
             return self
@@ -131,7 +132,7 @@ async def test_restart_during_deep_sleep_uses_cached_runtime_and_syncs_when_avai
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("cached_sleep", "latest_sleep"),
+    ("initial_sleep", "latest_sleep"),
     [
         (300, 300),  # config unchanged
         (300, 900),  # deep-sleep time changed
@@ -140,7 +141,7 @@ async def test_restart_during_deep_sleep_uses_cached_runtime_and_syncs_when_avai
     ],
 )
 async def test_runtime_config_sync_updates_deep_sleep_value_without_restart(
-    cached_sleep: int,
+    initial_sleep: int,
     latest_sleep: int,
 ) -> None:
     """Live availability transition refreshes runtime deep-sleep config."""
@@ -148,13 +149,15 @@ async def test_runtime_config_sync_updates_deep_sleep_value_without_restart(
     entry = _make_entry()
     coordinator = _FakeCoordinator()
 
-    cached_config = _make_device_config(cached_sleep)
+    initial_config = _make_device_config(initial_sleep)
     latest_config = _make_device_config(latest_sleep)
-    latest_fw = {"major": 2, "minor": 3}
+    fw_values = [{"major": 1, "minor": 0}, {"major": 2, "minor": 3}]
+    config_values = [initial_config, latest_config]
 
     class _FakeDevice:
-        is_flex = False
-        config = latest_config
+        def __init__(self, **kwargs) -> None:
+            self.is_flex = False
+            self.config = config_values.pop(0)
 
         async def __aenter__(self):
             return self
@@ -163,23 +166,21 @@ async def test_runtime_config_sync_updates_deep_sleep_value_without_restart(
             return False
 
         async def read_firmware_version(self):
-            return latest_fw
+            return fw_values.pop(0)
 
     with (
-        patch(
-            "custom_components.opendisplay._cached_runtime_data",
-            return_value=({"major": 1, "minor": 0}, cached_config, False),
-        ),
+        patch("custom_components.opendisplay._cached_runtime_data", return_value=None),
         patch("custom_components.opendisplay.OpenDisplayCoordinator", return_value=coordinator),
         patch("custom_components.opendisplay.dr.async_get", return_value=MagicMock()),
         patch("custom_components.opendisplay.OpenDisplayDevice", _FakeDevice),
         patch(
             "custom_components.opendisplay.async_ble_device_from_address",
-            side_effect=[None, MagicMock()],
+            side_effect=[MagicMock(), MagicMock()],
         ),
         patch("custom_components.opendisplay._cache_runtime_data") as mock_cache_runtime_data,
     ):
         assert await async_setup_entry(hass, entry) is True
+        assert entry.runtime_data.device_config.power.deep_sleep_time_seconds == initial_sleep
 
         coordinator.available = True
         coordinator.listener()
@@ -187,4 +188,3 @@ async def test_runtime_config_sync_updates_deep_sleep_value_without_restart(
 
     assert entry.runtime_data.device_config.power.deep_sleep_time_seconds == latest_sleep
     assert mock_cache_runtime_data.call_args.args[3] == latest_config
-
