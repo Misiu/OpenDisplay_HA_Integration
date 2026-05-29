@@ -326,6 +326,8 @@ async def _async_send_image(
     address = entry.unique_id
     assert address is not None
 
+    deep_sleep_seconds = entry.runtime_data.device_config.power.deep_sleep_time_seconds
+
     async def _upload(device: OpenDisplayDevice) -> None:
         await device.upload_image(
             img,
@@ -336,7 +338,7 @@ async def _async_send_image(
             rotate=rotate,
         )
 
-    def _queue_for_deep_sleep() -> None:
+    def _queue_for_deep_sleep(*, reason: str, error: Exception | None = None) -> None:
         """Queue upload until the sleeping device becomes connectable again."""
         expiry_seconds = int(deep_sleep_seconds * 1.1)
         if (handle := entry.runtime_data.deep_sleep_expiry_handle) is not None:
@@ -359,8 +361,10 @@ async def _async_send_image(
             if current_queued is queued_upload:
                 entry.runtime_data.deep_sleep_upload = None
                 _LOGGER.info(
-                    "Dropped queued image upload for %s after expiry timeout",
+                    "Dropped queued image upload for %s (sleep=%ss, ttl=%ss)",
                     address,
+                    deep_sleep_seconds,
+                    expiry_seconds,
                 )
             entry.runtime_data.deep_sleep_expiry_handle = None
 
@@ -368,17 +372,21 @@ async def _async_send_image(
             expiry_seconds, _purge_if_expired
         )
         _LOGGER.info(
-            "Device %s is not connectable; image upload queued for next wake-up",
+            "Queued image upload for %s (%s, sleep=%ss, ttl=%ss)",
             address,
+            reason,
+            deep_sleep_seconds,
+            expiry_seconds,
         )
+        if error is not None:
+            _LOGGER.debug("Queue trigger details for %s: %s", address, error)
 
-    deep_sleep_seconds = entry.runtime_data.device_config.power.deep_sleep_time_seconds
     if (
         async_ble_device_from_address(hass, address, connectable=True) is None
         and deep_sleep_seconds > 0
     ):
         # Device is sleeping right now – queue the upload for when it wakes.
-        _queue_for_deep_sleep()
+        _queue_for_deep_sleep(reason="device not connectable")
         return
 
     try:
@@ -387,12 +395,7 @@ async def _async_send_image(
         )
     except (BLEConnectionError, BLETimeoutError) as err:
         if deep_sleep_seconds > 0:
-            _LOGGER.info(
-                "Connection to %s failed; queued image upload for next wake-up: %s",
-                address,
-                err,
-            )
-            _queue_for_deep_sleep()
+            _queue_for_deep_sleep(reason="connection failed", error=err)
             return
         raise HomeAssistantError(
             translation_domain=DOMAIN,

@@ -8,6 +8,7 @@ Verifies:
 """
 
 from datetime import datetime, timedelta
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -140,6 +141,30 @@ async def test_send_image_queues_when_device_not_connectable() -> None:
 
 
 @pytest.mark.asyncio
+async def test_send_image_queue_log_includes_sleep_and_ttl(caplog: pytest.LogCaptureFixture) -> None:
+    """Queue log includes deep sleep and TTL when device is not connectable."""
+    hass = MagicMock()
+    entry = _make_entry(deep_sleep_time_seconds=300)
+    img = MagicMock()
+
+    from opendisplay import DitherMode, RefreshMode
+    from custom_components.opendisplay.services import _async_send_image
+
+    with (
+        patch(
+            "custom_components.opendisplay.services.async_ble_device_from_address",
+            return_value=None,
+        ),
+        caplog.at_level(logging.INFO),
+    ):
+        await _async_send_image(
+            hass, entry, img, dither_mode=DitherMode.BURKES, refresh_mode=RefreshMode.FULL
+        )
+
+    assert "Queued image upload for AA:BB:CC:DD:EE:FF (device not connectable, sleep=300s, ttl=330s)" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_send_image_uploads_immediately_when_connectable() -> None:
     """Image upload proceeds immediately when the BLE device is connectable."""
     hass = MagicMock()
@@ -191,27 +216,34 @@ async def test_send_image_queues_when_connection_times_out() -> None:
     class _FakeBLETimeoutError(Exception):
         """Synthetic timeout exception for fallback queue testing."""
 
-    with (
-        patch(
-            "custom_components.opendisplay.services.BLETimeoutError",
-            _FakeBLETimeoutError,
-        ),
-        patch(
-            "custom_components.opendisplay.services.async_ble_device_from_address",
-            return_value=MagicMock(),  # appears connectable
-        ),
-        patch(
-            "custom_components.opendisplay.services._async_connect_and_run",
-            new_callable=AsyncMock,
-            side_effect=_FakeBLETimeoutError("timeout"),
-        ) as mock_run,
-    ):
-        await _async_send_image(
-            hass, entry, img, dither_mode=DitherMode.BURKES, refresh_mode=RefreshMode.FULL
-        )
+    with caplog.at_level(logging.INFO):
+        with (
+            patch(
+                "custom_components.opendisplay.services.BLETimeoutError",
+                _FakeBLETimeoutError,
+            ),
+            patch(
+                "custom_components.opendisplay.services.async_ble_device_from_address",
+                return_value=MagicMock(),  # appears connectable
+            ),
+            patch(
+                "custom_components.opendisplay.services._async_connect_and_run",
+                new_callable=AsyncMock,
+                side_effect=_FakeBLETimeoutError("timeout"),
+            ) as mock_run,
+        ):
+            await _async_send_image(
+                hass, entry, img, dither_mode=DitherMode.BURKES, refresh_mode=RefreshMode.FULL
+            )
 
     assert entry.runtime_data.deep_sleep_upload is not None
     mock_run.assert_awaited_once()
+    queue_logs = [
+        rec.getMessage() for rec in caplog.records if "Queued image upload for" in rec.getMessage()
+    ]
+    assert queue_logs == [
+        "Queued image upload for AA:BB:CC:DD:EE:FF (connection failed, sleep=3600s, ttl=3960s)"
+    ]
 
 
 @pytest.mark.asyncio
