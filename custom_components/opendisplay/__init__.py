@@ -342,10 +342,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenDisplayConfigEntry) 
         _cache_runtime_data(hass, entry, latest_fw, latest_config, latest_is_flex)
         coordinator.async_update_listeners()
 
-    # Register coordinator listener to flush queued deep-sleep uploads when
-    # the device wakes up and becomes connectable again.
+    # Register coordinator listener to refresh runtime config and flush any
+    # queued deep-sleep upload when the device wakes up.
     def _on_coordinator_update() -> None:
-        """Try to flush any queued deep-sleep upload when device advertises."""
+        """Handle wake-up transitions and queued uploads on coordinator updates."""
         nonlocal was_available
         available_now = coordinator.available
         if available_now and not was_available:
