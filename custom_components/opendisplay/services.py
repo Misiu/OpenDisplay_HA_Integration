@@ -70,6 +70,17 @@ def _str_to_int_enum(enum_class: type[IntEnum]) -> Callable[[str], Any]:
     return validate
 
 
+def _coerce_none_to_default(default: Any) -> Callable[[Any], Any]:
+    """Map Home Assistant's 'none' sentinel to a schema default value."""
+
+    def validate(value: Any) -> Any:
+        if isinstance(value, str) and value.lower() == "none":
+            return default
+        return value
+
+    return validate
+
+
 SCHEMA_UPLOAD_IMAGE = vol.Schema(
     {
         vol.Required(ATTR_DEVICE_ID): cv.string,
@@ -77,7 +88,7 @@ SCHEMA_UPLOAD_IMAGE = vol.Schema(
             MediaSelectorConfig(accept=["image/*"])
         ),
         vol.Optional(ATTR_ROTATION, default=Rotation.ROTATE_0): vol.All(
-            vol.Coerce(int), vol.Coerce(Rotation)
+            _coerce_none_to_default(Rotation.ROTATE_0), vol.Coerce(int), vol.Coerce(Rotation)
         ),
         vol.Optional(ATTR_DITHER_MODE, default="burkes"): _str_to_int_enum(DitherMode),
         vol.Optional(ATTR_REFRESH_MODE, default="full"): _str_to_int_enum(RefreshMode),
@@ -96,9 +107,13 @@ SCHEMA_DRAWCUSTOM = vol.Schema(
         vol.Optional("area_id", default=[]): vol.All(cv.ensure_list, [cv.string]),
         vol.Required("payload"): list,
         vol.Optional("background", default="white"): cv.string,
-        vol.Optional("rotate", default=0): vol.All(vol.Coerce(int), vol.In([0, 90, 180, 270])),
+        vol.Optional("rotate", default=0): vol.All(
+            _coerce_none_to_default(0), vol.Coerce(int), vol.In([0, 90, 180, 270])
+        ),
         vol.Optional("dither", default="ordered"): _str_to_int_enum(DitherMode),
-        vol.Optional("refresh_type", default=0): vol.All(vol.Coerce(int), vol.In([0, 1])),
+        vol.Optional("refresh_type", default=0): vol.All(
+            _coerce_none_to_default(0), vol.Coerce(int), vol.In([0, 1])
+        ),
         vol.Optional("dry-run", default=False): cv.boolean,
     }
 )
