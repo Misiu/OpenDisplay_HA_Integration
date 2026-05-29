@@ -51,6 +51,7 @@ if TYPE_CHECKING:
     from . import OpenDisplayConfigEntry
 
 from .const import CONF_ENCRYPTION_KEY, DOMAIN, SIGNAL_IMAGE_UPDATED
+from .deep_sleep import deep_sleep_enabled, deep_sleep_seconds, supports_deep_sleep
 
 ATTR_IMAGE = "image"
 ATTR_ROTATION = "rotation"
@@ -326,7 +327,10 @@ async def _async_send_image(
     address = entry.unique_id
     assert address is not None
 
-    deep_sleep_seconds = entry.runtime_data.device_config.power.deep_sleep_time_seconds
+    device_config = entry.runtime_data.device_config
+    deep_sleep_supported = supports_deep_sleep(device_config)
+    sleep_seconds = deep_sleep_seconds(device_config)
+    deep_sleep_active = deep_sleep_supported and deep_sleep_enabled(device_config)
 
     async def _upload(device: OpenDisplayDevice) -> None:
         await device.upload_image(
@@ -340,7 +344,7 @@ async def _async_send_image(
 
     def _queue_for_deep_sleep(*, reason: str, error: Exception | None = None) -> None:
         """Queue upload until the sleeping device becomes connectable again."""
-        expiry_seconds = int(deep_sleep_seconds * 1.1)
+        expiry_seconds = int(sleep_seconds * 1.1)
         if (handle := entry.runtime_data.deep_sleep_expiry_handle) is not None:
             handle.cancel()
             entry.runtime_data.deep_sleep_expiry_handle = None
@@ -363,7 +367,7 @@ async def _async_send_image(
                 _LOGGER.info(
                     "Dropped queued image upload for %s (sleep=%ss, ttl=%ss)",
                     address,
-                    deep_sleep_seconds,
+                    sleep_seconds,
                     expiry_seconds,
                 )
             entry.runtime_data.deep_sleep_expiry_handle = None
@@ -375,7 +379,7 @@ async def _async_send_image(
             "Queued image upload for %s (%s, sleep=%ss, ttl=%ss)",
             address,
             reason,
-            deep_sleep_seconds,
+            sleep_seconds,
             expiry_seconds,
         )
         if error is not None:
@@ -383,7 +387,7 @@ async def _async_send_image(
 
     if (
         async_ble_device_from_address(hass, address, connectable=True) is None
-        and deep_sleep_seconds > 0
+        and deep_sleep_active
     ):
         # Device is sleeping right now – queue the upload for when it wakes.
         _queue_for_deep_sleep(reason="device not connectable")
@@ -394,7 +398,7 @@ async def _async_send_image(
             hass, entry, _upload, wrap_connection_errors=False
         )
     except (BLEConnectionError, BLETimeoutError) as err:
-        if deep_sleep_seconds > 0:
+        if deep_sleep_active:
             _queue_for_deep_sleep(reason="connection failed", error=err)
             return
         raise HomeAssistantError(

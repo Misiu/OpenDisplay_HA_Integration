@@ -42,7 +42,7 @@ from .const import (
     DOMAIN,
 )
 from .coordinator import OpenDisplayCoordinator
-from .deep_sleep import DeepSleepQueuedUpload
+from .deep_sleep import DeepSleepQueuedUpload, deep_sleep_seconds
 from .services import async_setup_services
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
@@ -61,6 +61,7 @@ class OpenDisplayRuntimeData:
     device_config: GlobalConfig
     is_flex: bool
     upload_task: asyncio.Task | None = None
+    config_sync_task: asyncio.Task | None = None
     deep_sleep_upload: DeepSleepQueuedUpload | None = None
     deep_sleep_expiry_handle: asyncio.TimerHandle | None = None
 
@@ -131,7 +132,30 @@ def _cached_runtime_data(
 
 def _deep_sleep_seconds(device_config: GlobalConfig) -> int:
     """Return deep sleep duration from device config."""
-    return int(device_config.power.deep_sleep_time_seconds)
+    return deep_sleep_seconds(device_config)
+
+
+def _log_config_changes(
+    address: str,
+    previous_config: GlobalConfig,
+    latest_config: GlobalConfig,
+) -> None:
+    """Log config changes detected between cached and live device config."""
+    previous = _serialize_device_config(previous_config)
+    latest = _serialize_device_config(latest_config)
+    if not isinstance(previous, dict) or not isinstance(latest, dict) or previous == latest:
+        return
+
+    changed_keys = sorted(
+        key
+        for key in (set(previous.keys()) | set(latest.keys()))
+        if previous.get(key) != latest.get(key)
+    )
+    _LOGGER.info(
+        "%s: Device config changed; syncing Home Assistant cache (changed keys: %s)",
+        address,
+        ", ".join(changed_keys) if changed_keys else "unknown",
+    )
 
 
 def _cache_runtime_data(
@@ -277,11 +301,54 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenDisplayConfigEntry) 
         entry, _get_platforms(entry.runtime_data)
     )
     entry.async_on_unload(coordinator.async_start())
+    was_available = coordinator.available
+
+    async def _async_sync_runtime_config() -> None:
+        """Refresh firmware/config after the device comes back online."""
+        ble_online = async_ble_device_from_address(hass, address, connectable=True)
+        if ble_online is None:
+            return
+
+        try:
+            async with OpenDisplayDevice(
+                mac_address=address,
+                ble_device=ble_online,
+                encryption_key=encryption_key,
+            ) as device:
+                latest_fw = await device.read_firmware_version()
+                latest_config = device.config
+                if TYPE_CHECKING:
+                    assert latest_config is not None
+                latest_is_flex = device.is_flex
+        except (AuthenticationFailedError, AuthenticationRequiredError) as err:
+            _LOGGER.debug("%s: Skipping runtime config sync due to auth error: %s", address, err)
+            return
+        except (BLEConnectionError, BLETimeoutError, OpenDisplayError) as err:
+            _LOGGER.debug("%s: Runtime config sync skipped: %s", address, err)
+            return
+
+        _log_config_changes(address, entry.runtime_data.device_config, latest_config)
+        entry.runtime_data.firmware = latest_fw
+        entry.runtime_data.device_config = latest_config
+        entry.runtime_data.is_flex = latest_is_flex
+        _cache_runtime_data(hass, entry, latest_fw, latest_config, latest_is_flex)
+        coordinator.async_update_listeners()
 
     # Register coordinator listener to flush queued deep-sleep uploads when
     # the device wakes up and becomes connectable again.
     def _on_coordinator_update() -> None:
         """Try to flush any queued deep-sleep upload when device advertises."""
+        nonlocal was_available
+        available_now = coordinator.available
+        if available_now and not was_available:
+            current = entry.runtime_data.config_sync_task
+            if current is None or current.done():
+                entry.runtime_data.config_sync_task = hass.async_create_task(
+                    _async_sync_runtime_config(),
+                    name=f"opendisplay_sync_config_{address}",
+                )
+        was_available = available_now
+
         queued = entry.runtime_data.deep_sleep_upload
         if queued is None:
             return
@@ -349,6 +416,10 @@ async def async_unload_entry(
         entry.runtime_data.deep_sleep_expiry_handle = None
 
     if (task := entry.runtime_data.upload_task) and not task.done():
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+    if (task := entry.runtime_data.config_sync_task) and not task.done():
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
