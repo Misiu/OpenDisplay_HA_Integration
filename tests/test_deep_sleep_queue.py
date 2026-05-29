@@ -179,6 +179,42 @@ async def test_send_image_uploads_immediately_when_connectable() -> None:
 
 
 @pytest.mark.asyncio
+async def test_send_image_queues_when_connection_times_out() -> None:
+    """Image upload is queued when connection fails but deep sleep is enabled."""
+    hass = MagicMock()
+    entry = _make_entry(deep_sleep_time_seconds=3600)
+    img = MagicMock()
+
+    from opendisplay import DitherMode, RefreshMode
+    from custom_components.opendisplay.services import _async_send_image
+
+    class _FakeBLETimeoutError(Exception):
+        """Synthetic timeout exception for fallback queue testing."""
+
+    with (
+        patch(
+            "custom_components.opendisplay.services.BLETimeoutError",
+            _FakeBLETimeoutError,
+        ),
+        patch(
+            "custom_components.opendisplay.services.async_ble_device_from_address",
+            return_value=MagicMock(),  # appears connectable
+        ),
+        patch(
+            "custom_components.opendisplay.services._async_connect_and_run",
+            new_callable=AsyncMock,
+            side_effect=_FakeBLETimeoutError("timeout"),
+        ) as mock_run,
+    ):
+        await _async_send_image(
+            hass, entry, img, dither_mode=DitherMode.BURKES, refresh_mode=RefreshMode.FULL
+        )
+
+    assert entry.runtime_data.deep_sleep_upload is not None
+    mock_run.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_send_image_queued_upload_replaces_previous() -> None:
     """A new image upload replaces any previously queued upload."""
     hass = MagicMock()

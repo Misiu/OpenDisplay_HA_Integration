@@ -18,6 +18,8 @@ from odl_renderer import generate_image
 from opendisplay import (
     AuthenticationFailedError,
     AuthenticationRequiredError,
+    BLEConnectionError,
+    BLETimeoutError,
     DitherMode,
     FitMode,
     LedFlashConfig,
@@ -252,6 +254,8 @@ async def _async_connect_and_run(
     hass: HomeAssistant,
     entry: "OpenDisplayConfigEntry",
     action: Callable[[OpenDisplayDevice], Awaitable[None]],
+    *,
+    wrap_connection_errors: bool = True,
 ) -> None:
     """Resolve BLE device, open a connection, run action, handle auth errors."""
     address = entry.unique_id
@@ -291,6 +295,14 @@ async def _async_connect_and_run(
         raise HomeAssistantError(
             translation_domain=DOMAIN, translation_key="authentication_error"
         ) from err
+    except (BLEConnectionError, BLETimeoutError) as err:
+        if not wrap_connection_errors:
+            raise
+        raise HomeAssistantError(
+            translation_domain=DOMAIN,
+            translation_key="upload_error",
+            translation_placeholders={"error": str(err)},
+        ) from err
     except OpenDisplayError as err:
         raise HomeAssistantError(
             translation_domain=DOMAIN,
@@ -324,21 +336,15 @@ async def _async_send_image(
             rotate=rotate,
         )
 
-    deep_sleep_seconds = entry.runtime_data.device_config.power.deep_sleep_time_seconds
-    if (
-        async_ble_device_from_address(hass, address, connectable=True) is None
-        and deep_sleep_seconds > 0
-    ):
-        # Device is sleeping right now – queue the upload for when it wakes.
-        # Expire slightly after the configured deep-sleep interval.
-        expiry_seconds = (
-            int(deep_sleep_seconds * 1.1)
-        )
+    def _queue_for_deep_sleep() -> None:
+        """Queue upload until the sleeping device becomes connectable again."""
+        expiry_seconds = int(deep_sleep_seconds * 1.1)
         if (handle := entry.runtime_data.deep_sleep_expiry_handle) is not None:
             handle.cancel()
             entry.runtime_data.deep_sleep_expiry_handle = None
 
         from .deep_sleep import DeepSleepQueuedUpload
+
         queued_upload = DeepSleepQueuedUpload(
             action=_upload,
             jpeg_bytes=b"",
@@ -365,9 +371,35 @@ async def _async_send_image(
             "Device %s is not connectable; image upload queued for next wake-up",
             address,
         )
+
+    deep_sleep_seconds = entry.runtime_data.device_config.power.deep_sleep_time_seconds
+    if (
+        async_ble_device_from_address(hass, address, connectable=True) is None
+        and deep_sleep_seconds > 0
+    ):
+        # Device is sleeping right now – queue the upload for when it wakes.
+        _queue_for_deep_sleep()
         return
 
-    await _async_connect_and_run(hass, entry, _upload)
+    try:
+        await _async_connect_and_run(
+            hass, entry, _upload, wrap_connection_errors=False
+        )
+    except (BLEConnectionError, BLETimeoutError) as err:
+        if deep_sleep_seconds > 0:
+            _LOGGER.info(
+                "Connection to %s failed; queued image upload for next wake-up: %s",
+                address,
+                err,
+            )
+            _queue_for_deep_sleep()
+            return
+        raise HomeAssistantError(
+            translation_domain=DOMAIN,
+            translation_key="upload_error",
+            translation_placeholders={"error": str(err)},
+        ) from err
+
     jpeg = await hass.async_add_executor_job(_pil_to_jpeg, img)
     async_dispatcher_send(hass, f"{SIGNAL_IMAGE_UPDATED}_{entry.unique_id}", jpeg)
 
