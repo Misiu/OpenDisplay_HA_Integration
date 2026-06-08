@@ -13,6 +13,69 @@ from enum import IntEnum
 from unittest.mock import MagicMock
 
 
+def _stub_aiousbwatcher() -> None:
+    """Stub optional Home Assistant USB watcher dependency for unit tests."""
+    if "aiousbwatcher" in sys.modules:
+        return
+
+    usb_mod = types.ModuleType("aiousbwatcher")
+
+    class AIOUSBWatcher:
+        pass
+
+    class InotifyNotAvailableError(Exception):
+        pass
+
+    usb_mod.AIOUSBWatcher = AIOUSBWatcher
+    usb_mod.InotifyNotAvailableError = InotifyNotAvailableError
+    sys.modules["aiousbwatcher"] = usb_mod
+
+
+_stub_aiousbwatcher()
+
+
+def _stub_serialx() -> None:
+    """Stub optional serialx dependency imported by Home Assistant USB."""
+    if "serialx" in sys.modules:
+        return
+
+    serialx_mod = types.ModuleType("serialx")
+    serialx_mod.__path__ = []
+    serialx_mod.register_uri_handler = MagicMock(return_value=lambda: None)
+
+    class SerialPortInfo:
+        def __init__(self, **kwargs):
+            self.device = kwargs.get("device", "")
+            self.vid = kwargs.get("vid")
+            self.pid = kwargs.get("pid")
+            self.serial_number = kwargs.get("serial_number")
+            self.manufacturer = kwargs.get("manufacturer")
+            self.description = kwargs.get("description")
+            self.bcd_device = kwargs.get("bcd_device")
+            self.interface_description = kwargs.get("interface_description")
+            self.interface_num = kwargs.get("interface_num")
+
+    serialx_mod.SerialPortInfo = SerialPortInfo
+    serialx_mod.list_serial_ports = MagicMock(return_value=[])
+    platforms_mod = types.ModuleType("serialx.platforms")
+    serial_esphome_mod = types.ModuleType("serialx.platforms.serial_esphome")
+
+    class ESPHomeSerial:
+        pass
+
+    class ESPHomeSerialTransport:
+        pass
+
+    serial_esphome_mod.ESPHomeSerial = ESPHomeSerial
+    serial_esphome_mod.ESPHomeSerialTransport = ESPHomeSerialTransport
+    sys.modules["serialx"] = serialx_mod
+    sys.modules["serialx.platforms"] = platforms_mod
+    sys.modules["serialx.platforms.serial_esphome"] = serial_esphome_mod
+
+
+_stub_serialx()
+
+
 def _stub_opendisplay() -> None:
     """Install a minimal opendisplay stub so unit tests run without the real library."""
     if "opendisplay" in sys.modules:
@@ -43,12 +106,14 @@ def _stub_opendisplay() -> None:
 
     class RefreshMode(IntEnum):
         FULL = 0
-        PARTIAL = 1
+        FAST = 1
+        PARTIAL = 2
 
     class FitMode(IntEnum):
-        CONTAIN = 0
-        COVER = 1
-        FILL = 2
+        STRETCH = 0
+        CONTAIN = 1
+        COVER = 2
+        CROP = 3
 
     class Rotation(IntEnum):
         ROTATE_0 = 0
@@ -108,7 +173,7 @@ def _stub_opendisplay() -> None:
     def parse_advertisement(data):
         return AdvertisementData()
 
-    def voltage_to_percent(v):
+    def voltage_to_percent(v, capacity_estimator=None):
         return 50
 
     # Build the opendisplay package and sub-modules in sys.modules
@@ -148,11 +213,15 @@ def _stub_opendisplay() -> None:
     enums_mod = types.ModuleType("opendisplay.models.enums")
 
     class CapacityEstimator(IntEnum):
-        UNKNOWN = 0
+        LI_ION = 1
+        LIFEPO4 = 2
+        SUPERCAP = 3
+        LITHIUM_PRIMARY = 4
 
     class PowerMode(IntEnum):
-        NORMAL = 0
-        DEEP_SLEEP = 1
+        BATTERY = 1
+        USB = 2
+        SOLAR = 3
 
     enums_mod.CapacityEstimator = CapacityEstimator
     enums_mod.PowerMode = PowerMode

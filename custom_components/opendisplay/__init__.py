@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, is_dataclass
-from datetime import datetime
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -25,41 +24,60 @@ except ImportError:
     config_from_json = None
     config_to_json = None
 
-from homeassistant.components.bluetooth import async_ble_device_from_address
+from homeassistant.components.bluetooth import (
+    async_ble_device_from_address,
+    async_clear_advertisement_history,
+)
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import (
     ConfigEntryAuthFailed,
     ConfigEntryNotReady,
-    HomeAssistantError,
 )
 from homeassistant.helpers import config_validation as cv, device_registry as dr
 from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH
-from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.typing import ConfigType
+from homeassistant.util import dt as dt_util
 
 if TYPE_CHECKING:
     from opendisplay.models import FirmwareVersion
+    from .services import PendingDisplayUpload
 
 from .const import (
     CONF_CACHED_DEVICE_CONFIG,
     CONF_CACHED_FIRMWARE,
     CONF_CACHED_IS_FLEX,
+    CONF_CACHED_LAST_SEEN,
     CONF_ENCRYPTION_KEY,
     DOMAIN,
-    SIGNAL_IMAGE_UPDATED,
 )
 from .coordinator import OpenDisplayCoordinator
-from .deep_sleep import DeepSleepQueuedUpload, deep_sleep_seconds
-from .services import async_setup_services
+from .deep_sleep import (
+    deep_sleep_enabled,
+    deep_sleep_seconds,
+    deep_sleep_timeout_margin_minutes,
+    supports_deep_sleep,
+)
+from .services import async_register_pending_upload_listener, async_setup_services
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 _LOGGER = logging.getLogger(__name__)
 
-_BASE_PLATFORMS: list[Platform] = [Platform.IMAGE, Platform.SENSOR]
-_FLEX_PLATFORMS = [Platform.EVENT, Platform.IMAGE, Platform.SENSOR, Platform.UPDATE]
+_BASE_PLATFORMS: list[Platform] = [
+    Platform.BINARY_SENSOR,
+    Platform.IMAGE,
+    Platform.SENSOR,
+]
+_FLEX_PLATFORMS = [
+    Platform.BINARY_SENSOR,
+    Platform.EVENT,
+    Platform.IMAGE,
+    Platform.SENSOR,
+    Platform.UPDATE,
+]
 _CONNECT_SETUP_TIMEOUT_SECONDS = 20
+_LAST_SEEN_CACHE_MIN_DELTA_SECONDS = 60
 
 
 @dataclass
@@ -72,9 +90,9 @@ class OpenDisplayRuntimeData:
     is_flex: bool
     upload_task: asyncio.Task | None = None
     config_sync_task: asyncio.Task | None = None
-    deep_sleep_flush_task: asyncio.Task | None = None
-    deep_sleep_upload: DeepSleepQueuedUpload | None = None
-    deep_sleep_expiry_handle: asyncio.TimerHandle | None = None
+    pending_upload: PendingDisplayUpload | None = None
+    pending_upload_task: asyncio.Task | None = None
+    pending_upload_expiry_unsub: Callable[[], None] | None = None
 
 
 type OpenDisplayConfigEntry = ConfigEntry[OpenDisplayRuntimeData]
@@ -188,12 +206,36 @@ def _normalize_entry_data(data: Mapping[str, Any]) -> dict[str, Any]:
             normalized.pop(CONF_CACHED_DEVICE_CONFIG, None)
             normalized.pop(CONF_CACHED_FIRMWARE, None)
             normalized.pop(CONF_CACHED_IS_FLEX, None)
+            normalized.pop(CONF_CACHED_LAST_SEEN, None)
     elif raw_device_config is not None:
         normalized.pop(CONF_CACHED_DEVICE_CONFIG, None)
         normalized.pop(CONF_CACHED_FIRMWARE, None)
         normalized.pop(CONF_CACHED_IS_FLEX, None)
+        normalized.pop(CONF_CACHED_LAST_SEEN, None)
+
+    raw_last_seen = normalized.get(CONF_CACHED_LAST_SEEN)
+    if raw_last_seen is not None:
+        last_seen = _cached_last_seen(normalized)
+        if last_seen is None:
+            normalized.pop(CONF_CACHED_LAST_SEEN, None)
+        else:
+            normalized[CONF_CACHED_LAST_SEEN] = last_seen
 
     return normalized
+
+
+def _cached_last_seen(entry_data: Mapping[str, Any]) -> float | None:
+    """Return cached last seen timestamp if present and valid."""
+    raw_last_seen = entry_data.get(CONF_CACHED_LAST_SEEN)
+    if raw_last_seen is None:
+        return None
+    try:
+        last_seen = float(raw_last_seen)
+    except (TypeError, ValueError):
+        return None
+    if last_seen <= 0:
+        return None
+    return last_seen
 
 
 def _cached_runtime_data(
@@ -249,6 +291,7 @@ def _cache_runtime_data(
     firmware: FirmwareVersion,
     device_config: GlobalConfig,
     is_flex: bool,
+    last_seen: float | None = None,
 ) -> None:
     """Persist runtime metadata so sleeping devices can restore quickly."""
     if not isinstance(firmware, dict):
@@ -260,7 +303,36 @@ def _cache_runtime_data(
     data[CONF_CACHED_FIRMWARE] = firmware
     data[CONF_CACHED_DEVICE_CONFIG] = serialized
     data[CONF_CACHED_IS_FLEX] = is_flex
+    if last_seen is not None:
+        data[CONF_CACHED_LAST_SEEN] = last_seen
     hass.config_entries.async_update_entry(entry, data=data)
+
+
+def _cache_last_seen(
+    hass: HomeAssistant,
+    entry: OpenDisplayConfigEntry,
+    last_seen: float | None,
+) -> None:
+    """Persist last seen without writing storage for every BLE advertisement."""
+    if last_seen is None or last_seen <= 0:
+        return
+    previous_last_seen = _cached_last_seen(entry.data)
+    if (
+        previous_last_seen is not None
+        and last_seen - previous_last_seen < _LAST_SEEN_CACHE_MIN_DELTA_SECONDS
+    ):
+        return
+    data = dict(entry.data)
+    data[CONF_CACHED_LAST_SEEN] = last_seen
+    hass.config_entries.async_update_entry(entry, data=data)
+    _LOGGER.debug(
+        "%s: Cached last_seen persisted (last_seen=%s, previous_last_seen=%s)",
+        getattr(entry, "unique_id", "unknown"),
+        dt_util.utc_from_timestamp(last_seen).isoformat(),
+        dt_util.utc_from_timestamp(previous_last_seen).isoformat()
+        if previous_last_seen is not None
+        else None,
+    )
 
 
 def _get_encryption_key(entry_data: Mapping[str, Any]) -> bytes | None:
@@ -297,11 +369,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenDisplayConfigEntry) 
         assert address is not None
 
     cached_runtime = _cached_runtime_data(entry_data)
+    cached_last_seen = _cached_last_seen(entry_data)
     ble_device = async_ble_device_from_address(hass, address, connectable=True)
     encryption_key = _get_encryption_key(entry_data)
     fw: FirmwareVersion
     device_config: GlobalConfig
     is_flex: bool
+    startup_from_cache = False
 
     if ble_device is None:
         if cached_runtime is None or _deep_sleep_seconds(cached_runtime[1]) <= 0:
@@ -309,9 +383,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenDisplayConfigEntry) 
                 f"Could not find OpenDisplay device with address {address}"
             )
         fw, device_config, is_flex = cached_runtime
+        startup_from_cache = True
         _LOGGER.info(
             "%s: Device not connectable at startup; using cached config "
-            "(deep sleep=%ss, assumed state)",
+            "(deep sleep=%ss, startup cache fallback)",
             address,
             _deep_sleep_seconds(device_config),
         )
@@ -338,9 +413,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenDisplayConfigEntry) 
                     "Timed out while connecting to OpenDisplay device"
                 ) from err
             fw, device_config, is_flex = cached_runtime
+            startup_from_cache = True
             _LOGGER.info(
                 "%s: Startup connection timed out; using cached config "
-                "(deep sleep=%ss, assumed state)",
+                "(deep sleep=%ss, startup cache fallback)",
                 address,
                 _deep_sleep_seconds(device_config),
             )
@@ -350,17 +426,57 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenDisplayConfigEntry) 
                     f"Failed to connect to OpenDisplay device: {err}"
                 ) from err
             fw, device_config, is_flex = cached_runtime
+            startup_from_cache = True
             _LOGGER.info(
                 "%s: Startup connection failed (%s); using cached config "
-                "(deep sleep=%ss, assumed state)",
+                "(deep sleep=%ss, startup cache fallback)",
                 address,
                 err,
                 _deep_sleep_seconds(device_config),
             )
         else:
             _cache_runtime_data(hass, entry, fw, device_config, is_flex)
+        finally:
+            async_clear_advertisement_history(hass, address)
 
-    coordinator = OpenDisplayCoordinator(hass, address)
+    coordinator = OpenDisplayCoordinator(
+        hass,
+        address,
+        deep_sleep_time_seconds=_deep_sleep_seconds(device_config),
+        deep_sleep_timeout_margin_minutes=deep_sleep_timeout_margin_minutes(
+            entry.options
+        ),
+    )
+    if startup_from_cache:
+        coordinator.async_startup_from_cache()
+    coordinator.async_restore_last_seen(cached_last_seen)
+
+    expected_wakeup = coordinator.expected_wakeup_timestamp
+    cached_last_seen_iso = (
+        dt_util.utc_from_timestamp(cached_last_seen).isoformat()
+        if cached_last_seen is not None
+        else None
+    )
+    _LOGGER.info(
+        "%s: Startup diagnostics "
+        "(deep_sleep_supported=%s, deep_sleep_enabled=%s, "
+        "deep_sleep_seconds=%ss, deep_sleep_timeout_margin=%smin, "
+        "availability_window=%ss, ble_connectable_at_startup=%s, "
+        "online_at_startup=%s, loaded_from_cache=%s, "
+        "coordinator_available=%s, cached_last_seen=%s, expected_wakeup=%s)",
+        address,
+        supports_deep_sleep(device_config),
+        deep_sleep_enabled(device_config),
+        _deep_sleep_seconds(device_config),
+        coordinator.deep_sleep_timeout_margin_minutes,
+        coordinator.deep_sleep_availability_window_seconds,
+        ble_device is not None,
+        ble_device is not None and not startup_from_cache,
+        startup_from_cache,
+        coordinator.available,
+        cached_last_seen_iso,
+        expected_wakeup.isoformat() if expected_wakeup else None,
+    )
 
     manufacturer = device_config.manufacturer
     display = device_config.displays[0]
@@ -436,19 +552,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenDisplayConfigEntry) 
         except (BLEConnectionError, BLETimeoutError, OpenDisplayError) as err:
             _LOGGER.debug("%s: Runtime config sync skipped: %s", address, err)
             return
+        finally:
+            async_clear_advertisement_history(hass, address)
 
         _log_config_changes(address, entry.runtime_data.device_config, latest_config)
         entry.runtime_data.firmware = latest_fw
         entry.runtime_data.device_config = latest_config
         entry.runtime_data.is_flex = latest_is_flex
+        coordinator.async_set_deep_sleep_time_seconds(
+            _deep_sleep_seconds(latest_config)
+        )
         _cache_runtime_data(hass, entry, latest_fw, latest_config, latest_is_flex)
-        coordinator.async_update_listeners()
 
-    # Register coordinator listener to refresh runtime config and flush any
-    # queued deep-sleep upload when the device wakes up.
+    # Register coordinator listener to refresh runtime config when the device wakes.
     def _on_coordinator_update() -> None:
-        """Handle wake-up transitions and queued uploads on coordinator updates."""
+        """Handle wake-up transitions and runtime config synchronization."""
         nonlocal was_available
+        if coordinator.deep_sleep_time_seconds > 0 and coordinator.data is not None:
+            _cache_last_seen(hass, entry, coordinator.data.last_seen)
         available_now = coordinator.available
         if available_now and not was_available:
             current = entry.runtime_data.config_sync_task
@@ -459,107 +580,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenDisplayConfigEntry) 
                 )
         was_available = available_now
 
-        flush_task = entry.runtime_data.deep_sleep_flush_task
-        if flush_task is not None and flush_task.done():
-            entry.runtime_data.deep_sleep_flush_task = None
-
-        queued = entry.runtime_data.deep_sleep_upload
-        if queued is None:
-            return
-        if queued.is_expired:
-            entry.runtime_data.deep_sleep_upload = None
-            if (handle := entry.runtime_data.deep_sleep_expiry_handle) is not None:
-                handle.cancel()
-                entry.runtime_data.deep_sleep_expiry_handle = None
-            return
-        if async_ble_device_from_address(hass, address, connectable=True) is None:
-            _LOGGER.debug(
-                "%s: Queued image still waiting; device is not connectable",
-                address,
-            )
-            return
-        if entry.runtime_data.deep_sleep_flush_task is not None:
-            return
-
-        queued_age = datetime.now() - queued.queued_at
-        ttl_left = max(0, int((queued.expiry - queued_age).total_seconds()))
-
-        _LOGGER.info(
-            "%s: Device is online again; attempting queued image upload "
-            "(sleep=%ss, ttl_left=%ss)",
-            address,
-            _deep_sleep_seconds(entry.runtime_data.device_config),
-            ttl_left,
-        )
-
-        async def _flush_queued_upload() -> None:
-            """Send queued upload once the device wakes up."""
-            from .services import _async_connect_and_run  # noqa: PLC0415 – avoid circular import at module level
-
-            try:
-                await _async_connect_and_run(
-                    hass, entry, queued.action, wrap_connection_errors=False
-                )
-            except (BLEConnectionError, BLETimeoutError) as err:
-                current_queued = entry.runtime_data.deep_sleep_upload
-                if current_queued is queued and not queued.is_expired:
-                    queued_age = datetime.now() - queued.queued_at
-                    ttl_left = max(0, int((queued.expiry - queued_age).total_seconds()))
-                    _LOGGER.info(
-                        "%s: Queued image upload deferred again; keeping queue "
-                        "(ttl_left=%ss): %s",
-                        address,
-                        ttl_left,
-                        err,
-                    )
-                else:
-                    _LOGGER.debug(
-                        "%s: Queued image upload failed after wake-up but queue is no "
-                        "longer active: %s",
-                        address,
-                        err,
-                    )
-            except HomeAssistantError as err:
-                if entry.runtime_data.deep_sleep_upload is queued:
-                    entry.runtime_data.deep_sleep_upload = None
-                    if (
-                        handle := entry.runtime_data.deep_sleep_expiry_handle
-                    ) is not None:
-                        handle.cancel()
-                        entry.runtime_data.deep_sleep_expiry_handle = None
-                _LOGGER.warning(
-                    "%s: Failed to send queued image after wake-up; "
-                    "dropping queue: %s",
-                    address,
-                    err,
-                )
-            else:
-                if entry.runtime_data.deep_sleep_upload is queued:
-                    entry.runtime_data.deep_sleep_upload = None
-                    if (
-                        handle := entry.runtime_data.deep_sleep_expiry_handle
-                    ) is not None:
-                        handle.cancel()
-                        entry.runtime_data.deep_sleep_expiry_handle = None
-                if queued.jpeg_bytes:
-                    async_dispatcher_send(
-                        hass,
-                        f"{SIGNAL_IMAGE_UPDATED}_{address}",
-                        queued.jpeg_bytes,
-                    )
-                _LOGGER.info("%s: Queued image sent to display", address)
-            finally:
-                if (
-                    task := asyncio.current_task()
-                ) is not None and entry.runtime_data.deep_sleep_flush_task is task:
-                    entry.runtime_data.deep_sleep_flush_task = None
-
-        entry.runtime_data.deep_sleep_flush_task = hass.async_create_task(
-            _flush_queued_upload(),
-            name=f"opendisplay_deepsleep_flush_{address}",
-        )
-
     entry.async_on_unload(coordinator.async_add_listener(_on_coordinator_update))
+    entry.async_on_unload(async_register_pending_upload_listener(hass, entry))
 
     return True
 
@@ -576,19 +598,18 @@ async def async_unload_entry(
     hass: HomeAssistant, entry: OpenDisplayConfigEntry
 ) -> bool:
     """Unload a config entry."""
-    if (handle := entry.runtime_data.deep_sleep_expiry_handle) is not None:
-        handle.cancel()
-        entry.runtime_data.deep_sleep_expiry_handle = None
-
     if (task := entry.runtime_data.upload_task) and not task.done():
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
-    if (task := entry.runtime_data.deep_sleep_flush_task) and not task.done():
+    if (task := entry.runtime_data.pending_upload_task) and not task.done():
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
-    entry.runtime_data.deep_sleep_flush_task = None
+    entry.runtime_data.pending_upload_task = None
+    if (unsub := entry.runtime_data.pending_upload_expiry_unsub) is not None:
+        unsub()
+        entry.runtime_data.pending_upload_expiry_unsub = None
     if (task := entry.runtime_data.config_sync_task) and not task.done():
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
