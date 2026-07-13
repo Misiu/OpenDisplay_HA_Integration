@@ -89,7 +89,6 @@ FALLBACK_TAG_DEFINITIONS = {
     130: {"version": 2, "name": "Chroma29 2.9\"", "width": 296, "height": 128},
     131: {"version": 2, "name": "Chroma42 4.2\"", "width": 400, "height": 300},
     144: {"version": 3, "name": "M3 4.2\" BWRY", "width": 400, "height": 300},
-    145: {"version": 1, "name": "M3 1.6\" 200px BWRY", "width": 200, "height": 200},
     176: {"version": 5, "name": "Gicisky BLE EPD BW 2.13\"", "width": 250, "height": 128},
     177: {"version": 5, "name": "Gicisky BLE EPD BWR 2.13\"", "width": 250, "height": 128},
     178: {"version": 2, "name": "Gicisky BLE EPD BW 2.9\"", "width": 296, "height": 128},
