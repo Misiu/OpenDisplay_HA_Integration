@@ -96,6 +96,7 @@ FALLBACK_TAG_DEFINITIONS = {
     179: {"version": 2, "name": "Gicisky BLE EPD BWR 2.9\"", "width": 296, "height": 128},
     181: {"version": 2, "name": "Gicisky BLE EPD BWR 4.2\"", "width": 400, "height": 300},
     186: {"version": 5, "name": "Gicisky BLE TFT 2.13\"", "width": 250, "height": 136},
+    187: {"version": 2, "name": "Gicisky BLE EPD BWRY 2.9\"", "width": 296, "height": 128},
     189: {"version": 2, "name": "BLE EPD BWR 2.9\" Silabs", "width": 384, "height": 168},
     190: {"version": 1, "name": "ATC MiThermometer BLE", "width": 6, "height": 8},
     192: {"version": 2, "name": "BWRY example", "width": 360, "height": 184},
